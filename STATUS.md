@@ -473,6 +473,17 @@ After that, in order:
   but promise nothing. All access goes through `espn.js` so a break is one
   file, and manual grading is always available. Alternates: TheSportsDB,
   balldontlie for NBA, nflverse for NFL after the fact.
+- **The free odds feed covers three markets and no more.** A scoreboard entry
+  carries a book's moneyline for both sides, the spread for both sides, and the
+  game total, and that is the lot. Player props and team totals are not in it at
+  any price, so the entry form says so rather than leaving a blank box. Two
+  traps: a game drops its odds entirely once it is no longer `pre`, so prices
+  cannot be read back after kickoff, and `moneyline.home.close.odds` is a
+  **string** (`"-597"`), not a number. `fixtures/nba_scoreboard_odds.json` is a
+  frozen capture of a fully priced board for exactly this reason, and
+  `capture_fixtures.py` refuses to overwrite it: regenerating it on a later day
+  would swap in a board with no prices and the pricing tests would pass while
+  asserting nothing.
 - **Worker CPU, not D1 rows, is the cron's binding constraint.** One NFL
   summary is roughly 650KB of JSON and a single parse is most of a free-tier
   invocation. The grader must work off a queue a few events at a time, never a
