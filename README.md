@@ -24,6 +24,18 @@ donation.
 - **Nothing is graded on a guess.** Anything the engine is not sure about asks
   you instead, with a one-tap answer, so a lock is never stuck.
 
+## Getting your friends on it
+
+1. Open the app and make an account.
+2. Start a league. You get a six-character code.
+3. Send them the **Share link** from the league screen. It takes them straight
+   in: they make an account and land in your league without typing the code.
+
+On a phone, use Add to Home Screen and it behaves like an app.
+
+If somebody would rather type the code, Join a league on the first screen takes
+it in any case, with or without spaces.
+
 ## How it is built
 
 No framework, no build step, no dependencies in the app. Vanilla ES modules
