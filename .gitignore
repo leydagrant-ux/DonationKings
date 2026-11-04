@@ -2,3 +2,4 @@ tools/test-accounts.local.json
 *.local.json
 worker/.wrangler/
 node_modules/
+.scan-test.*

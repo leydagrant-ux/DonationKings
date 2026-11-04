@@ -223,6 +223,80 @@ async function leagueLocks(db, code) {
   }));
 }
 
+/* ============================== reading a slip ============================== */
+
+/* Model order is lifted from the LockIN worker, where these three are already
+ * in production on this account. Groq retired every vision model during 2026,
+ * which is why this runs on Workers AI rather than there. */
+const VISION_ATTEMPTS = [
+  { model: '@cf/meta/llama-3.2-11b-vision-instruct', style: 'messages' },
+  { model: '@cf/mistralai/mistral-small-3.1-24b-instruct', style: 'messages' },
+  { model: '@cf/llava-hf/llava-1.5-7b-hf', style: 'bytes' },
+];
+
+/* A TRANSCRIPTION prompt, not a description prompt. The model's job is to read
+ * pixels into text and nothing else; turning that text into legs is done by
+ * deterministic, tested code on the client. Asking a model to "extract JSON"
+ * instead would be less accurate, impossible to test, and would drift with
+ * every model version.
+ *
+ * "Character for character" matters more than it looks: a 249.5 read as 246.5
+ * settles a bet wrongly with no trace, which is why the person is shown this
+ * text to correct before anything is saved. */
+const SLIP_PROMPT = [
+  'Transcribe every line of text in this sports betting slip, top to bottom, in order.',
+  'Keep numbers, prices and lines character for character: do not round, reorder or tidy them.',
+  'Put each selection on its own line, and keep its market on the next line exactly as shown.',
+  'Include the stake, the payout, the odds and any boost.',
+  'Do not summarize, do not explain, do not add anything that is not printed on the slip.',
+  'If part of it is unreadable, write [unclear] there rather than guessing.',
+].join(' ');
+
+function dataUrlToBytes(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function readSlip(body, env, cors) {
+  if (!env.AI) return json({ error: 'Reading screenshots is not set up on this Worker' }, 501, cors);
+
+  const dataUrl = String((body && body.image) || '');
+  if (!dataUrl.startsWith('data:image/')) return json({ error: 'image must be a data: URL' }, 400, cors);
+  /* The client compresses well below this. The cap is here so one stray
+     upload cannot burn the day's free neuron allowance. */
+  if (dataUrl.length > 1_500_000) return json({ error: 'that image is too large' }, 413, cors);
+
+  const tried = [];
+  for (const attempt of VISION_ATTEMPTS) {
+    try {
+      const input = attempt.style === 'messages'
+        ? {
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: SLIP_PROMPT },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          }],
+          max_tokens: 1200,
+        }
+        : { image: [...dataUrlToBytes(dataUrl)], prompt: SLIP_PROMPT, max_tokens: 1200 };
+
+      const res = await env.AI.run(attempt.model, input);
+      const text = String(res?.response ?? res?.result?.response ?? res?.description ?? '').trim();
+      if (text) return json({ text, model: attempt.model }, 200, cors);
+      tried.push(`${attempt.model}: empty response`);
+    } catch (err) {
+      tried.push(`${attempt.model}: ${String(err?.message || err).slice(0, 120)}`);
+    }
+  }
+  return json({ error: 'No model could read that screenshot. Type it in instead.', tried }, 502, cors);
+}
+
 const audit = (db, code, lockId, actor, action, detail) =>
   db.prepare('INSERT INTO audit (id, code, lock_id, actor_uid, action, detail, created_ts) VALUES (?,?,?,?,?,?,?)')
     .bind(newId('a'), code || null, lockId || null, actor || null, action, detail ? JSON.stringify(detail) : null, nowSec());
@@ -251,6 +325,15 @@ export async function route(method, path, body, env, claims, cors) {
        ON CONFLICT(uid) DO UPDATE SET display_name = excluded.display_name, last_seen_ts = excluded.last_seen_ts`,
     ).bind(uid, name, nowSec(), nowSec()).run();
     return json({ uid, name }, 200, cors);
+  }
+
+  /* -- reading a slip ------------------------------------------------ */
+
+  if (method === 'POST' && path === '/v1/ingest/read') {
+    const out = await readSlip(body, env, cors);
+    // Logged so a run of failures is visible later without storing the image.
+    await audit(db, null, null, uid, out.status === 200 ? 'slip.read' : 'slip.read.failed', null).run();
+    return out;
   }
 
   /* -- leagues ------------------------------------------------------- */

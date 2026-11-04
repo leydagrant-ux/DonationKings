@@ -615,6 +615,46 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .bigbtn[disabled] { background: var(--surface-2); color: var(--mute); cursor: not-allowed; }
 .bigbtn[disabled]:hover { filter: none; }
 
+/* ===================================================================== */
+/* Reading a screenshot                                                   */
+/* ===================================================================== */
+
+.scan { display: flex; flex-direction: column; gap: 14px; }
+.scan-drop {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 36px 20px; text-align: center; cursor: pointer;
+  border: 2px dashed var(--line); border-radius: var(--r-card);
+  background: var(--surface-3); color: var(--dim);
+}
+.scan-drop:hover { border-color: var(--green-deep); color: var(--text); }
+.scan-drop.busy { cursor: progress; border-style: solid; border-color: var(--green-deep); }
+.scan-icon { color: var(--green); }
+.scan-title { font-size: 17px; font-weight: 700; color: var(--text); }
+.scan-sub { font-size: 13px; max-width: 34ch; line-height: 1.45; }
+
+.scan-confirm { display: flex; flex-direction: column; gap: 14px; }
+.scan-shot {
+  width: 100%; max-height: 240px; object-fit: contain; object-position: top;
+  border-radius: var(--r-btn); background: #000;
+  border: 1px solid var(--line);
+}
+.scan-confirm textarea {
+  background: var(--surface-2); border: 1.5px solid var(--line);
+  border-radius: var(--r-btn); padding: 12px 13px; width: 100%;
+  color: var(--text); font-size: 14px; line-height: 1.5; resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.scan-confirm textarea:focus { outline: none; border-color: var(--green-deep); }
+
+.scan-found { font-size: 14px; color: var(--dim); }
+.scan-found b { color: var(--text); font-weight: 800; }
+.scan-legs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.scan-legs li {
+  display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+  background: var(--surface-3); border-radius: 9px; padding: 10px 12px; font-size: 14px;
+}
+.scan-legs .odds { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 /* One-tap grading for a leg the engine refused to call. */
 .leg-fix { display: flex; gap: 7px; margin-top: 8px; flex-wrap: wrap; }
 .leg-fix button {

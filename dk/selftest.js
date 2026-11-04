@@ -23,6 +23,7 @@ import * as P from './parlay.js';
 import * as L from './league.js';
 import * as ST from './store.js';
 import * as DV from './derive.js';
+import * as SL from './slip.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -1012,6 +1013,171 @@ function testStore(t, snaps) {
 }
 
 // ---------------------------------------------------------------------------
+// slip.js
+// ---------------------------------------------------------------------------
+
+/* These transcripts are what a vision model would produce from real slips.
+ * The content is taken from actual DraftKings screenshots, so the layout,
+ * wording and line order are the real thing rather than something invented to
+ * suit the parser. */
+
+const LOST_COMBO = `4 Pick Combo | 2.6%
+Lost
+CLE Browns, BAL Ravens, MIN Vikings, ATL Falcons
+Bought: $1.19
+Position Information
+CLE Browns
+To Win
+Final
+CLE Browns 0 6 0 0 6
+PIT Steelers 7 13 7 0 27
+BAL Ravens
+To Win
+Final
+BAL Ravens 7 0 3 0 10
+BUF Bills 10 6 7 13 36`;
+
+const WON_COMBO = `DRAFTKINGS
+2 Pick Combo | 36%
+Won
+Derrick Henry, Josh Allen
+Bought: $24.70 | Paid: $69.03
+10% Boost
+Position Information
+Derrick Henry
+Anytime TD Scorer
+Josh Allen
+Anytime TD Scorer
+Final
+BAL Ravens 7 0 3 0 10
+BUF Bills 10 6 7 13 36
+Share
+Hide Legs
+Trade
+Placed: Nov 1, 2026 at 8:36:23 AM`;
+
+const PRICED_LEGS = `3 Leg Parlay
+Wager $25.00
+To Win $212.50
+Jordan Love Over 249.5 Passing Yards  -115
+Tucker Kraft Anytime TD  +260
+Total Points Over 44.5
+-110`;
+
+function testSlip(t) {
+  t.section('slip: money');
+  t.eq('a plain amount', SL.parseMoney('$24.70'), 2470);
+  t.eq('thousands separators', SL.parseMoney('$1,234.56'), 123456);
+  t.eq('no dollar sign', SL.parseMoney('25'), 2500);
+  t.eq('no cents', SL.parseMoney('$100'), 10000);
+  t.eq('nothing there', SL.parseMoney('no money here'), null);
+
+  t.section('slip: headline numbers');
+  t.eq('leg count from "4 Pick Combo"', SL.declaredLegCount('4 Pick Combo | 2.6%'), 4);
+  t.eq('leg count from "3 Leg Parlay"', SL.declaredLegCount('3 Leg Parlay'), 3);
+  t.eq('no count to find', SL.declaredLegCount('Single'), null);
+  t.eq('a boost badge', SL.declaredBoost('10% Boost'), 10);
+  t.eq('the other wording', SL.declaredBoost('Profit Boost 25%'), 25);
+  t.eq('no boost', SL.declaredBoost('2 Pick Combo'), null);
+
+  t.section('slip: guessing the league');
+  t.eq('football words', SL.guessLeague('Anytime TD Scorer, Passing Yards'), 'nfl');
+  t.eq('a named NBA team', SL.guessLeague('Celtics ML'), 'nba');
+  t.eq('basketball stats', SL.guessLeague('Over 29.5 Points + Rebounds + Assists'), 'nba');
+  t.eq('college football', SL.guessLeague('CFB: Zips ML'), 'cfb');
+
+  t.section('slip: a real losing combo');
+  const lost = SL.parseSlip(LOST_COMBO);
+  t.eq('the stake is read', lost.stakeCents, 119);
+  t.eq('and the leg count the slip declares', lost.declaredLegs, 4);
+  // Each team appears twice: once as a selection and once in the box score.
+  // The box score rows carry scores, so only the selections should parse.
+  t.ok('the selections are found', lost.picks.length >= 2, `got ${lost.picks.length}`);
+  t.ok('and they are the teams, not the score lines',
+    lost.picks.every((p) => !/\d\s+\d/.test(p.text)), JSON.stringify(lost.picks.map((p) => p.text)));
+  t.ok('Browns is among them', lost.picks.some((p) => /browns/i.test(p.text)));
+  // The slip says four picks; if fewer were read, say so rather than
+  // quietly saving a three-leg lock.
+  t.ok('a miscount is reported, not hidden',
+    lost.picks.length === 4 || lost.warnings.some((w) => /missing leg/.test(w)),
+    JSON.stringify(lost.warnings));
+
+  t.section('slip: a real winning combo');
+  const won = SL.parseSlip(WON_COMBO);
+  t.eq('the stake', won.stakeCents, 2470);
+  t.eq('the payout', won.payoutCents, 6903);
+  t.eq('the boost', won.boostPct, 10);
+  t.eq('two picks', won.picks.length, 2);
+  t.ok('both are the players', won.picks.every((p) => /henry|allen/i.test(p.text)),
+    JSON.stringify(won.picks.map((p) => p.text)));
+  t.eq('read as football', won.league, 'nfl');
+  // Chrome lines must not become legs.
+  t.ok('Share and Hide Legs are ignored',
+    !won.picks.some((p) => /share|hide|placed|draftkings/i.test(p.text)));
+  t.ok('the box score rows are ignored',
+    !won.picks.some((p) => /ravens 7|bills 10/i.test(p.text)));
+
+  t.section('slip: prices on the leg lines');
+  const priced = SL.parseSlip(PRICED_LEGS);
+  t.eq('the stake', priced.stakeCents, 2500);
+  t.eq('the payout', priced.payoutCents, 21250);
+  t.eq('three legs', priced.picks.length, 3);
+  t.eq('a trailing price is taken off the selection', priced.picks[0].odds, -115);
+  t.ok('and not left in the text', !/-115/.test(priced.picks[0].text), priced.picks[0].text);
+  t.eq('the second price', priced.picks[1].odds, 260);
+  // The third leg's price is on the NEXT line, which books do constantly.
+  t.eq('a price on the following line is picked up', priced.picks[2].odds, -110);
+  t.ok('the yardage line survives in the text', /249\.5/.test(priced.picks[0].text), priced.picks[0].text);
+
+  t.section('slip: what a real model actually returned');
+  // Verbatim from a live Workers AI run against one of Grant's own
+  // DraftKings screenshots, markdown fence and all. Models wrap transcripts
+  // in a fence even when told not to, so it is stripped rather than argued
+  // with in the prompt.
+  const REAL = '```\n6:55\n1h\nTrades\nBets\nPick\'Em\nHorse Bets\nPools\nAll\nOpen\nLive\nSettled\nWon\n'
+    + 'DRAFTKINGS\nTHE CROWN IS YOURS\n2 Pick Combo | 36%\nDerrick Henry, Josh Allen\n'
+    + 'Bought: $24.70 | Paid: $69.03\n10% Boost\nPosition Information\nDerrick Henry\nAnytime TD Scorer\n'
+    + 'Josh Allen\nAnytime TD Scorer\nFinal\nBAL Ravens\n7 0 3 0 10\nBUF Bills\n10 6 7 13 36\n'
+    + 'Share\nHide Legs\nTrade\nHome\nLive\nMy Activity\nSearch\nRewards\n```';
+  const real = SL.parseSlip(REAL);
+  t.eq('the stake survives the chrome', real.stakeCents, 2470);
+  t.eq('and the payout', real.payoutCents, 6903);
+  t.eq('and the boost', real.boostPct, 10);
+  t.eq('exactly the two real selections', real.picks.length, 2);
+  t.eq('with their markets attached', real.picks.map((p) => p.text),
+    ['Derrick Henry Anytime TD Scorer', 'Josh Allen Anytime TD Scorer']);
+  t.eq('matching the count the slip states', real.declaredLegs, 2);
+  // The app's own navigation was in the screenshot and must not become bets.
+  t.ok('tab bar and filter chips are not legs',
+    !real.picks.some((p) => /trades|pick.em|rewards|settled|my activity|horse/i.test(p.text)));
+  t.ok('and neither is the box score', !real.picks.some((p) => /ravens|bills/i.test(p.text)));
+  t.ok('a fenced transcript parses the same as an unfenced one',
+    SL.parseSlip(REAL.replace(/```/g, '')).picks.length === real.picks.length);
+
+  t.section('slip: saying so when it is unsure');
+  const empty = SL.parseSlip('DraftKings\nMy Bets\nSettled');
+  t.eq('nothing recognized', empty.picks.length, 0);
+  t.ok('and it says so', empty.warnings.some((w) => /No selections/.test(w)));
+  t.ok('a missing stake is reported', empty.warnings.some((w) => /stake/.test(w)));
+  t.ok('missing prices are reported',
+    SL.parseSlip('2 Pick Combo\nBought: $5.00\nPackers ML\nTo Win').warnings.some((w) => /price/.test(w)));
+  t.eq('junk in, nothing out', SL.parseSlip('').picks.length, 0);
+  t.eq('and it does not throw', typeof SL.parseSlip(null).warnings, 'object');
+
+  t.section('slip: handing over to the entry form');
+  const draft = SL.slipToDraft(won, 'ABC234');
+  t.eq('the league code comes along', draft.code, 'ABC234');
+  t.eq('the stake carries over', draft.stakeCents, 2470);
+  t.eq('the boost carries over', draft.boostPct, 10);
+  t.eq('the picks become editable rows', draft.picks.length, 2);
+  t.ok('odds are strings the form can show', draft.picks.every((p) => typeof p.odds === 'string'));
+  // An unreadable slip still opens a usable form rather than a dead end.
+  const blank = SL.slipToDraft(SL.parseSlip('nothing here'), 'ABC234');
+  t.eq('an empty slip still gives one row to type into', blank.picks.length, 1);
+  t.ok('with a sensible default stake', blank.stakeCents > 0);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1029,6 +1195,7 @@ export function runAll(fixtures) {
   testParlay(t);
   testLeague(t);
   testStore(t, snaps);
+  testSlip(t);
   const ms = Date.now() - t0;
   const passed = t.results.filter((r) => r.pass).length;
   return { results: t.results, passed, failed: t.results.length - passed, ms };

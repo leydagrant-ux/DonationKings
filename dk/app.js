@@ -22,6 +22,7 @@ import * as D from './derive.js';
 import * as UI from './ui.js';
 import * as LG from './ui-league.js';
 import * as EN from './ui-entry.js';
+import * as IN from './ingest.js';
 import * as AUTH from './auth.js';
 import * as API from './api.js';
 import { localBackend, cloudBackend } from './backend.js';
@@ -46,6 +47,9 @@ let authMode = 'in'; // 'in' | 'up'
 // necessarily propagated by the time onAuthStateChanged fires, so without
 // this the new account's display name falls back to its email address.
 let pendingName = null;
+// The screenshot path. `scan` is null when typing, otherwise it holds the
+// stage: picking a file, or confirming what was read.
+let scan = null;
 let be = null;
 let syncing = false;
 const settleTried = new Set();
@@ -229,6 +233,16 @@ function locksViewHTML(onlyLive) {
   const lg = league();
   if (!lg) return noLeagueHTML();
 
+  // The screenshot path, which runs before the form.
+  if (scan && scan.stage === 'pick') {
+    return `<div class="section"><h2>New lock</h2><p>Add a screenshot and it reads the slip for you.</p></div>`
+      + `<div class="card form">${EN.scanStartHTML(scan.busy, scan.error)}</div>`;
+  }
+  if (scan && scan.stage === 'confirm') {
+    return `<div class="section"><h2>Check what it read</h2><p>Against your screenshot, before anything is saved.</p></div>`
+      + `<div class="card form">${EN.scanConfirmHTML(scan)}</div>`;
+  }
+
   if (draft) {
     return `<div class="section"><h2>New lock</h2><p>Type each leg the way the book words it.</p></div>`
       + `<div class="card form">${EN.entryFormHTML(draft, L.leagueList(state.membership, state.me.uid))}</div>`;
@@ -354,7 +368,11 @@ root.addEventListener('click', async (e) => {
   if (btn.classList.contains('tab')) return setUI({ tab: btn.textContent.trim() });
   if (btn.closest('.tabbar')) {
     const label = btn.querySelector('span:last-child').textContent.trim();
-    if (label === 'Add') { draft = EN.emptyDraft(league() ? league().code : null); return setUI({ tab: 'My Locks' }); }
+    if (label === 'Add') {
+      scan = CLOUD && user ? { stage: 'pick', busy: false } : null;
+      draft = scan ? null : EN.emptyDraft(league() ? league().code : null);
+      return setUI({ tab: 'My Locks' });
+    }
     if (label === 'Board') return setUI({ tab: 'League' });
     if (label === 'Home') return setUI({ tab: 'My Locks' });
     return setUI({ tab: label });
@@ -423,9 +441,29 @@ root.addEventListener('click', async (e) => {
     return undefined;
   }
 
+  /* -- the screenshot path -- */
+  if (action === 'type-instead') {
+    scan = null;
+    draft = EN.emptyDraft(league() ? league().code : null);
+    return render();
+  }
+  if (action === 'scan-retry') { scan = { stage: 'pick', busy: false }; return render(); }
+  if (action === 'scan-continue') {
+    // Re-read from whatever the person edited, not from what the model said.
+    const edited = document.getElementById('scan-text');
+    const { draft: d } = IN.redraft(edited ? edited.value : scan.transcript, league() ? league().code : null);
+    draft = d;
+    scan = null;
+    return render();
+  }
+
   /* -- lock entry -- */
-  if (action === 'new-lock') { draft = EN.emptyDraft(league() ? league().code : null); return setUI({ tab: 'My Locks' }); }
-  if (action === 'cancel-lock') { draft = null; return render(); }
+  if (action === 'new-lock') {
+    scan = CLOUD && user ? { stage: 'pick', busy: false } : null;
+    draft = scan ? null : EN.emptyDraft(league() ? league().code : null);
+    return setUI({ tab: 'My Locks' });
+  }
+  if (action === 'cancel-lock') { draft = null; scan = null; return render(); }
   if (action === 'add-leg') {
     draft = { ...draft, picks: [...draft.picks, { text: '', league: draft.picks[draft.picks.length - 1].league, odds: '' }] };
     return render();
@@ -523,12 +561,38 @@ function readDraftInputs() {
 
 // Re-render the draft on change rather than on input, so the readback updates
 // without the field losing focus mid-word.
-root.addEventListener('change', (e) => {
+root.addEventListener('change', async (e) => {
+  // A screenshot was picked.
+  if (e.target.id === 'scan-file') {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    scan = { stage: 'pick', busy: true };
+    render();
+    let out;
+    try {
+      out = await IN.readFileToDraft(file, league() ? league().code : null);
+    } catch (err) {
+      out = { ok: false, error: (err && err.message) || 'Could not read that file.' };
+    }
+    if (!out.ok) { scan = { stage: 'pick', busy: false, error: out.error }; return render(); }
+    scan = { stage: 'confirm', transcript: out.transcript, preview: out.preview, slip: out.slip, model: out.model };
+    return render();
+  }
+
+  // The transcript was edited: re-read the legs from it, keeping the caret
+  // where it was so editing does not fight the re-render.
+  if (e.target.id === 'scan-text' && scan) {
+    const { slip } = IN.redraft(e.target.value, league() ? league().code : null);
+    scan = { ...scan, transcript: e.target.value, slip };
+    return render();
+  }
+
   if (!draft) return;
   if (e.target.matches('.entry-text, .entry-odds, .entry-sport, #entry-stake, #entry-boost, #entry-league')) {
     readDraftInputs();
     render();
   }
+  return undefined;
 });
 
 /* ============================== boot ============================== */

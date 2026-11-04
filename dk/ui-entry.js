@@ -61,6 +61,56 @@ function legRowHTML(pick, i, count) {
   </div>`;
 }
 
+/**
+ * The screenshot path's first screen: pick a file, or skip to typing.
+ */
+export function scanStartHTML(busy, error) {
+  return `<div class="scan">
+    <label class="scan-drop ${busy ? 'busy' : ''}">
+      <input type="file" id="scan-file" accept="image/*" ${busy ? 'disabled' : ''} hidden>
+      <div class="scan-icon">${ICONS.slipScan}</div>
+      <div class="scan-title">${busy ? 'Reading the screenshot...' : 'Add a screenshot of your slip'}</div>
+      <div class="scan-sub">${busy ? 'This takes a few seconds.' : 'Screenshot the bet in your sportsbook app, then pick it here.'}</div>
+    </label>
+    ${error ? `<div class="notice warn">${esc(error)}</div>` : ''}
+    <button class="linkbtn" data-action="type-instead">Type it in instead</button>
+  </div>`;
+}
+
+/**
+ * The confirmation step, which is not optional.
+ *
+ * The transcript is shown next to the screenshot so a misread number can be
+ * caught here rather than at settlement, when it would quietly pay the wrong
+ * person. Editing the text re-reads the legs underneath.
+ */
+export function scanConfirmHTML({ transcript, preview, slip, model }) {
+  const found = slip.picks.length;
+  return `<div class="scan-confirm">
+    <div class="notice">
+      Check this against your screenshot before saving. A misread number
+      settles a bet wrongly and leaves no trace.
+    </div>
+
+    ${preview ? `<img class="scan-shot" src="${esc(preview)}" alt="The screenshot you added">` : ''}
+
+    <label class="field"><span>What was read${model ? ` (${esc(String(model).split('/').pop())})` : ''}</span>
+      <textarea id="scan-text" rows="10" spellcheck="false">${esc(transcript)}</textarea></label>
+    <p class="field-note">Fix anything wrong, then continue. The legs below update as you edit.</p>
+
+    <div class="scan-found">
+      <b>${found}</b> ${found === 1 ? 'selection' : 'selections'} found${slip.stakeCents ? `, stake ${money(slip.stakeCents)}` : ''}
+      ${slip.declaredLegs ? ` &middot; the slip says ${slip.declaredLegs}` : ''}
+    </div>
+    ${slip.picks.length ? `<ul class="scan-legs">${slip.picks.map((p) => `
+      <li><span>${esc(p.text)}</span><span class="odds">${p.odds === null ? 'no price' : americanStr(p.odds)}</span></li>`).join('')}</ul>` : ''}
+    ${slip.warnings.map((w) => `<div class="notice warn">${esc(w)}</div>`).join('')}
+
+    <button class="bigbtn" data-action="scan-continue">Continue to the form</button>
+    <button class="linkbtn" data-action="scan-retry">Use a different screenshot</button>
+  </div>`;
+}
+
 export function entryFormHTML(draft, leagues) {
   const odds = draft.picks.map((p) => parseAmerican(p.odds)).filter((o) => o !== null);
   const complete = draft.picks.filter((p) => String(p.text || '').trim() && parseAmerican(p.odds) !== null);

@@ -10,7 +10,7 @@ bankroll for the week.
 
 ## Where it stands
 
-**SHIPPED.** Live at <https://leydagrant-ux.github.io/DonationKings/>, backed
+**SHIPPED, and it reads screenshots.** Live at <https://leydagrant-ux.github.io/DonationKings/>, backed
 by a deployed Worker and D1. 485 checks pass across three suites.
 
 Build steps 1, 2 and 3 are done.
@@ -73,7 +73,9 @@ dk/theme.css    design tokens and every component class
 dk/ui.js        render helpers: lock card, leg rows, box score, chrome
 dk/ui-league.js switcher, standings, history, invite, owner controls
 dk/ui-entry.js  adding a lock by hand, with a live parser readback
-dk/selftest.js  383 checks over all the pure modules
+dk/slip.js      slip transcript -> draft lock. Pure, and the reason this works
+dk/ingest.js    compress a screenshot, send it up, hand back a draft
+dk/selftest.js  442 checks over all the pure modules
 preview.html    static design preview, real fixtures through the real engine
 selftest.html   browser test runner; sets document.title to the result
 design/         exported screenshots of the current look
@@ -359,6 +361,41 @@ impossible to take back. The schema test asserts both halves.
 column accepts `'2500'` and coerces it, because that conversion is lossless.
 It only refuses what would lose information. So the Worker validates types
 itself rather than leaning on STRICT, and both facts have tests.
+
+## Reading a screenshot
+
+Working and deployed. Point it at a bet slip screenshot and it fills the form
+in.
+
+The division of labour is the whole design. **A vision model does one thing:
+read pixels into text.** Everything after that is `slip.js`, which is
+deterministic, offline and tested against transcripts a real model actually
+produced. Asking a model to "extract JSON" instead would be less accurate,
+untestable, and would drift with every model version.
+
+It runs on **Workers AI**, not Gemini, trying three models in order. Those
+model ids are lifted from the LockIN worker where they are already in
+production on this account, so no new API key and no new signup. Groq is not
+an option: it retired every vision model during 2026.
+
+**The confirmation step is not optional.** The transcript is shown next to the
+screenshot and can be edited, and the legs re-read as you type. A 249.5 misread
+as 246.5 looks perfectly reasonable on screen and is only wrong when the money
+moves, which is exactly the kind of mistake nobody catches.
+
+Things learned from running it on a real DraftKings screenshot:
+
+- **The selection is on one line and its market on the next.** That is the
+  layout every real slip uses. Parsing lines independently gave two legs both
+  called "Anytime TD Scorer" with no player. The join only happens when the
+  current line is not already a complete bet, or a self-contained line like
+  "Total Points Over 44.5" gets swallowed into the leg above it.
+- **The model wraps its output in a markdown fence** even when told not to.
+  Stripped rather than argued with in the prompt.
+- The screenshot contains the sportsbook's own navigation, filter chips and
+  box score. None of it may become a bet.
+- Slips often do not print per-leg prices, only the total. That is reported as
+  a warning rather than guessed at.
 
 ## Next task
 
