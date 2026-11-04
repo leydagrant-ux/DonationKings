@@ -37,6 +37,12 @@ const CLOUD = isConfigured() && !DEMO;
 
 let state = null;
 let ctx = { events: [], snapshots: [], errors: [] };
+
+// Today's games with their betting lines, used only to price the entry form.
+// Kept apart from `ctx` because `ctx` is replaced wholesale on every refresh
+// to match exactly what the open locks need, and that would throw away the
+// slate for a league nobody has a lock in yet.
+let slate = [];
 let draft = null;
 let loading = false;
 let pollTimer = null;
@@ -110,6 +116,62 @@ async function refresh() {
   render();
   await reportSettlements();
   schedulePoll();
+}
+
+// Leagues whose slate has already been pulled, so typing in the entry form
+// does not refetch on every change.
+const slateLoaded = new Set();
+
+// Loaded as soon as the entry form opens. The other leagues load when their
+// leg is actually switched to them, because a November college basketball
+// scoreboard is several hundred games and nobody should pay for that slate
+// just to price an NFL moneyline.
+const ENTRY_LEAGUES = ['nfl', 'nba'];
+
+/**
+ * Make sure the entry form can quote a price for these leagues.
+ *
+ * The grading path loads only what open locks already reference, which is
+ * nothing at all in a brand new league. Without this, the very first lock
+ * anybody writes is the one lock the app cannot offer a price for, which is
+ * exactly the one where it matters most.
+ *
+ * Fire and forget: it re-renders when the prices land, so opening the form
+ * stays instant on a slow connection instead of waiting on the network.
+ */
+async function ensureSlate(leagues) {
+  if (DEMO) return; // fixtures carry no odds, and demo must not hit the network
+  const want = [...new Set((leagues || []).filter((lg) => lg && !slateLoaded.has(lg)))];
+  if (!want.length) return;
+  let added = false;
+  await Promise.all(want.map(async (lg) => {
+    const { events, errors } = await F.loadSlates([lg]);
+    // Only remember a league as loaded when it actually loaded, so a dropped
+    // request on a phone retries rather than leaving prices off for good.
+    if (!errors.length) slateLoaded.add(lg);
+    if (!events.length) return;
+    const byId = new Map(slate.map((e) => [e.eventId, e]));
+    for (const e of events) if (!byId.has(e.eventId)) byId.set(e.eventId, e);
+    slate = [...byId.values()];
+    added = true;
+  }));
+  if (added && (draft || scan)) render();
+}
+
+/** The leagues the open draft needs priced. */
+const draftLeagues = () => [...ENTRY_LEAGUES, ...((draft && draft.picks) || []).map((p) => p.league)];
+
+/**
+ * The slate the entry form prices against.
+ *
+ * The grading context comes first, because those events were loaded for a
+ * lock that is already open and are the ones being polled; the entry slate
+ * fills in the leagues no open lock mentions.
+ */
+function pricingEvents() {
+  const byId = new Map(slate.map((e) => [e.eventId, e]));
+  for (const e of ctx.events) byId.set(e.eventId, e);
+  return [...byId.values()];
 }
 
 /**
@@ -253,7 +315,7 @@ function locksViewHTML(onlyLive) {
 
   if (draft) {
     return `<div class="section"><h2>New lock</h2><p>Type each leg the way the book words it.</p></div>`
-      + `<div class="card form">${EN.entryFormHTML(draft, L.leagueList(state.membership, state.me.uid))}</div>`;
+      + `<div class="card form">${EN.entryFormHTML(draft, L.leagueList(state.membership, state.me.uid), pricingEvents())}</div>`;
   }
 
   let list = myLocks();
@@ -280,15 +342,22 @@ function render() {
   const liveCount = myLocks().filter((d) => d.state === STATE.PENDING).length;
   const needAuth = CLOUD && !user;
 
+  // Until there is a league, every tab would render the same "Start here"
+  // screen, so tapping them looks like nothing happens. There is exactly one
+  // thing to do at that point, so show only that and hide the navigation.
+  const noLeague = !needAuth && !league();
+  const chrome = !needAuth && !noLeague;
+
   const body = needAuth ? authViewHTML()
-    : tab === 'League' ? leagueViewHTML()
-      : tab === 'Live' ? locksViewHTML(true)
-        : locksViewHTML(false);
+    : noLeague ? noLeagueHTML()
+      : tab === 'League' ? leagueViewHTML()
+        : tab === 'Live' ? locksViewHTML(true)
+          : locksViewHTML(false);
 
   const scroll = window.scrollY;
   root.innerHTML = [
     UI.appBarHTML({ bankrollCents: myBankroll(), initials: state.me.initials }),
-    needAuth ? '' : UI.tabsHTML(['My Locks', 'Live', 'League'], tab),
+    chrome ? UI.tabsHTML(['My Locks', 'Live', 'League'], tab) : '',
     banner ? `<div class="notice warn">${UI.esc(banner)}</div>` : '',
     DEMO ? '<div class="notice">Demo data. Nothing here is saved.</div>' : '',
     !CLOUD && !DEMO
@@ -296,7 +365,7 @@ function render() {
       : '',
     syncing ? '<div class="notice">Loading your leagues...</div>' : '',
     body,
-    needAuth ? '' : UI.tabBarHTML(tab, liveCount ? { Live: liveCount } : {}),
+    chrome ? UI.tabBarHTML(tab, liveCount ? { Live: liveCount } : {}) : '',
   ].join('');
   window.scrollTo(0, scroll);
 }
@@ -381,8 +450,10 @@ root.addEventListener('click', async (e) => {
       draft = scan ? null : EN.emptyDraft(league() ? league().code : null);
       return setUI({ tab: 'My Locks' });
     }
-    if (label === 'Board') return setUI({ tab: 'League' });
-    if (label === 'Home') return setUI({ tab: 'My Locks' });
+    // Leaving a half-finished entry by tapping a tab should drop it rather
+    // than keeping it pinned over whatever you switched to.
+    draft = null;
+    scan = null;
     return setUI({ tab: label });
   }
 
@@ -456,6 +527,7 @@ root.addEventListener('click', async (e) => {
   if (action === 'type-instead') {
     scan = null;
     draft = EN.emptyDraft(league() ? league().code : null);
+    ensureSlate(draftLeagues());
     return render();
   }
   if (action === 'scan-retry') { scan = { stage: 'pick', busy: false }; return render(); }
@@ -465,6 +537,7 @@ root.addEventListener('click', async (e) => {
     const { draft: d } = IN.redraft(edited ? edited.value : scan.transcript, league() ? league().code : null);
     draft = d;
     scan = null;
+    ensureSlate(draftLeagues());
     return render();
   }
 
@@ -472,11 +545,20 @@ root.addEventListener('click', async (e) => {
   if (action === 'new-lock') {
     scan = CLOUD && user ? { stage: 'pick', busy: false } : null;
     draft = scan ? null : EN.emptyDraft(league() ? league().code : null);
+    // Start pulling the slate now, even on the screenshot path, so the prices
+    // are already there by the time the transcript is confirmed.
+    ensureSlate(ENTRY_LEAGUES);
     return setUI({ tab: 'My Locks' });
   }
   if (action === 'cancel-lock') { draft = null; scan = null; return render(); }
   if (action === 'add-leg') {
     draft = { ...draft, picks: [...draft.picks, { text: '', league: draft.picks[draft.picks.length - 1].league, odds: '' }] };
+    return render();
+  }
+  if (action === 'use-odds') {
+    readDraftInputs();
+    const i = Number(btn.dataset.i);
+    draft = { ...draft, picks: draft.picks.map((p, j) => (j === i ? { ...p, odds: btn.dataset.odds } : p)) };
     return render();
   }
   if (action === 'del-leg') {
@@ -601,6 +683,9 @@ root.addEventListener('change', async (e) => {
   if (!draft) return;
   if (e.target.matches('.entry-text, .entry-odds, .entry-sport, #entry-stake, #entry-boost, #entry-league')) {
     readDraftInputs();
+    // Switching a leg to a league nobody has a lock in pulls that slate, so
+    // the price for it appears a moment later.
+    if (e.target.matches('.entry-sport')) ensureSlate(draftLeagues());
     render();
   }
   return undefined;

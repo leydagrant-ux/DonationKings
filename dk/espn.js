@@ -206,6 +206,86 @@ function competitorOf(c) {
   };
 }
 
+/**
+ * The betting line on an event, so a price does not have to be typed in.
+ *
+ * ESPN carries a book's own numbers on a scheduled game: moneyline, spread
+ * with its price, and total with its price, for both sides. This is what lets
+ * the app know the Knicks are -220 tonight rather than asking.
+ *
+ * It covers game-level markets ONLY. Player props are not in this feed at any
+ * price, so those still have to be typed, and the entry form says so rather
+ * than leaving a blank field looking broken.
+ *
+ * The numbers are quoted strings ("-518", "o221.5"), and a book may publish
+ * either a closing or a current line, so both are accepted.
+ */
+function sideOdds(block, side) {
+  const s = (block || {})[side];
+  if (!s) return null;
+  const q = s.close || s.current || s.open || null;
+  if (!q) return null;
+  // A total's line is written "o221.5" / "u221.5".
+  const rawLine = q.line === undefined ? null : String(q.line).replace(/^[ou]/i, '');
+  return {
+    odds: q.odds === undefined ? null : num(q.odds),
+    line: rawLine === null ? null : num(rawLine),
+  };
+}
+
+export function oddsFromCompetition(comp) {
+  const o = ((comp || {}).odds || [])[0];
+  if (!o) return null;
+  const ml = sideOdds(o.moneyline, 'home');
+  const mla = sideOdds(o.moneyline, 'away');
+  const sh = sideOdds(o.pointSpread, 'home');
+  const sa = sideOdds(o.pointSpread, 'away');
+  const to = sideOdds(o.total, 'over');
+  const tu = sideOdds(o.total, 'under');
+
+  const any = [ml, mla, sh, sa, to, tu].some((x) => x && (x.odds !== null || x.line !== null));
+  if (!any) return null;
+
+  return {
+    provider: ((o.provider || {}).name) || null,
+    details: o.details || null,
+    moneyline: { home: ml ? ml.odds : null, away: mla ? mla.odds : null },
+    spread: {
+      home: sh ? { line: sh.line, odds: sh.odds } : null,
+      away: sa ? { line: sa.line, odds: sa.odds } : null,
+    },
+    total: {
+      line: (to && to.line !== null) ? to.line : (tu ? tu.line : (num(o.overUnder) ?? null)),
+      over: to ? to.odds : null,
+      under: tu ? tu.odds : null,
+    },
+  };
+}
+
+/**
+ * The price for one selection, or null when this feed does not carry it.
+ *
+ * `market` and `side` use the resolver's own vocabulary, so a parsed leg can
+ * be handed straight in.
+ */
+export function priceFor(event, { market, side, teamAbbr }) {
+  const o = event && event.odds;
+  if (!o) return null;
+  const which = teamAbbr && event.home && event.home.abbr === teamAbbr ? 'home'
+    : teamAbbr && event.away && event.away.abbr === teamAbbr ? 'away' : null;
+
+  if (market === 'moneyline') return which ? o.moneyline[which] : null;
+  if (market === 'spread') {
+    const s = which ? o.spread[which] : null;
+    return s ? { odds: s.odds, line: s.line } : null;
+  }
+  if (market === 'game_total') {
+    const odds = side === 'under' ? o.total.under : o.total.over;
+    return { odds, line: o.total.line };
+  }
+  return null; // team totals and player props are not in this feed
+}
+
 /** Normalize a scoreboard payload into a flat list of events. */
 export function eventsFromScoreboard(raw, league) {
   const out = [];
@@ -223,6 +303,7 @@ export function eventsFromScoreboard(raw, league) {
       state: st.state || null,
       detail: st.detail || null,
       completed: st.completed === true,
+      odds: oddsFromCompetition(comp),
       home: sides.find((s) => s.homeAway === 'home') || null,
       away: sides.find((s) => s.homeAway === 'away') || null,
     });

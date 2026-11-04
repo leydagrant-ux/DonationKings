@@ -189,6 +189,26 @@ export async function loadFixtureContext(base = './fixtures/') {
   return { events, snapshots, errors };
 }
 
+/**
+ * Today's games for some leagues, with their betting lines, and nothing else.
+ *
+ * Scoreboards only: no box scores, so this is cheap. It exists because the
+ * entry form needs the slate to quote a price, and a brand new league has no
+ * locks yet to have loaded one. Without this, the first lock anybody ever
+ * writes is the one with no price offered.
+ */
+export async function loadSlates(leagues) {
+  const want = [...new Set((leagues || []).filter((lg) => LEAGUES[lg]))];
+  const events = [];
+  const errors = [];
+  await Promise.all(want.map(async (lg) => {
+    const ev = await fetchScoreboard(lg);
+    if (ev) events.push(...ev);
+    else errors.push(`could not load the ${lg.toUpperCase()} slate`);
+  }));
+  return { events, errors };
+}
+
 /** True when anything on the slate is still running, so polling should continue. */
 export function anyLive(snapshots, events) {
   return (snapshots || []).some((s) => s.state === 'in')

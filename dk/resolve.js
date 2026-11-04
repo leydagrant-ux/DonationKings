@@ -129,6 +129,18 @@ const NUM = String.raw`[+-]?\d+(?:\.\d+)?`;
  * and that way one grading rule covers both. It also correctly makes alt
  * lines unpushable, which is right: you cannot tie "2+".
  */
+/**
+ * Does this text name both sides of a game rather than one team?
+ *
+ * The separators are the ones books actually print: "vs", "vs.", "v", "at",
+ * "@" and a bare slash. The word forms are bounded on both sides so a team
+ * whose own name contains the letters is safe: "Atlanta" has no boundary
+ * after "at", and "Heat" has none before it.
+ */
+function isMatchup(s) {
+  return /\bvs?\.?\s|\sat\s|@|\//i.test(String(s || ''));
+}
+
 export function parseLegText(raw, sport = 'football') {
   const text = String(raw || '').replace(/\s+/g, ' ').trim();
   if (!text) return { market: null, reason: 'empty' };
@@ -208,9 +220,17 @@ export function parseLegText(raw, sport = 'football') {
         confidence: C.EXACT,
       };
     }
-    // An over/under with no recognizable stat and a team in front is a team total.
+    // An over/under with no recognizable stat and a team in front is a team
+    // total, unless the text names BOTH sides of a matchup, which is how a
+    // book words a GAME total: "Knicks vs Bulls Over 233.5".
+    //
+    // The difference is not cosmetic. Graded as a team total, a game total
+    // settles under essentially every time, because one team does not score
+    // what two teams score. That is a silent loss on a leg that won.
     if (before) {
-      return { market: 'team_total', subjectRaw: before, side, line, stat: null, confidence: C.LAST_ONLY };
+      return isMatchup(before)
+        ? { market: 'game_total', subjectRaw: before, side, line, stat: null, confidence: C.EXACT }
+        : { market: 'team_total', subjectRaw: before, side, line, stat: null, confidence: C.LAST_ONLY };
     }
   }
 
@@ -256,6 +276,28 @@ export function parseLegText(raw, sport = 'football') {
  * shortDisplayName, name, location), so a slip's wording is nearly always a
  * direct match against one of them. That makes this exact rather than fuzzy.
  */
+/**
+ * Several name hits that all land in one game are a matchup, not an ambiguity.
+ *
+ * "Knicks vs Bulls" matches both sides of the same fixture. The game is
+ * therefore known exactly, and only the SIDE is undecidable, so this returns
+ * the event with `teamAbbr` deliberately null. Callers that need a side must
+ * check for that; a game total does not need one, which is the whole point.
+ */
+function oneGame(hits) {
+  if (!hits.length) return null;
+  const ids = new Set(hits.map((h) => h.ev.eventId));
+  if (ids.size !== 1) return null;
+  return {
+    eventId: hits[0].ev.eventId,
+    event: hits[0].ev,
+    side: null,
+    teamAbbr: null,
+    matchup: true,
+    confidence: C.EXACT,
+  };
+}
+
 export function resolveTeam(nameRaw, events) {
   const want = normName(nameRaw);
   if (!want) return { confidence: C.NONE, reason: 'no team name' };
@@ -273,6 +315,8 @@ export function resolveTeam(nameRaw, events) {
     return { eventId: h.ev.eventId, side: h.side, teamAbbr: h.t.abbr, event: h.ev, confidence: C.EXACT };
   }
   if (hits.length > 1) {
+    const one = oneGame(hits);
+    if (one) return one;
     return { confidence: C.AMBIGUOUS, reason: `team "${nameRaw}" matches ${hits.length} games`, candidates: hits.map((h) => h.ev.eventId) };
   }
 
@@ -293,6 +337,8 @@ export function resolveTeam(nameRaw, events) {
     const h = loose[0];
     return { eventId: h.ev.eventId, side: h.side, teamAbbr: h.t.abbr, event: h.ev, confidence: C.LAST_ONLY };
   }
+  const one = oneGame(loose);
+  if (one) return one;
   return {
     confidence: C.NONE,
     reason: loose.length ? `team "${nameRaw}" is ambiguous across ${loose.length} games` : `no team matched "${nameRaw}"`,
@@ -411,10 +457,15 @@ export function resolveLeg(leg, ctx) {
   }
 
   if (parsed.market === 'game_total') {
-    // A game total names no subject, so the event has to come from elsewhere:
-    // the slip's own matchup line, or whatever the rest of the slip resolved.
-    const ev = ctx.events && ctx.events.length === 1 ? ctx.events[0] : null;
+    // A game total usually names no subject, so the event has to come from
+    // elsewhere: an id already on the leg, the matchup the text itself names
+    // ("Knicks vs Bulls Over 233.5"), or a slate of exactly one game.
     if (leg.eventId) return { ...parsed, eventId: leg.eventId, confidence: C.EXACT };
+    if (parsed.subjectRaw) {
+      const t = resolveTeam(parsed.subjectRaw, ctx.events);
+      if (t.eventId) return { ...parsed, eventId: t.eventId, confidence: t.confidence };
+    }
+    const ev = ctx.events && ctx.events.length === 1 ? ctx.events[0] : null;
     if (ev) return { ...parsed, eventId: ev.eventId, confidence: C.EXACT };
     return { ...parsed, confidence: C.NONE, reason: 'game total needs the matchup, which the slip did not give' };
   }
@@ -422,6 +473,17 @@ export function resolveLeg(leg, ctx) {
   if (TEAM_MARKETS.has(parsed.market)) {
     const t = resolveTeam(parsed.subjectRaw, ctx.events);
     if (!t.eventId) return { ...parsed, confidence: C.NONE, reason: t.reason };
+    // The game is known but the side is not, because the text named both
+    // teams. A moneyline or spread has to be graded for one of them, so this
+    // goes to review rather than picking a team and hoping.
+    if (!t.teamAbbr) {
+      return {
+        ...parsed,
+        eventId: t.eventId,
+        confidence: C.NONE,
+        reason: `"${parsed.subjectRaw}" names both teams, so there is no side to grade`,
+      };
+    }
     return { ...parsed, eventId: t.eventId, teamAbbr: t.teamAbbr, side_: t.side, confidence: t.confidence };
   }
 

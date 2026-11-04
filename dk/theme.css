@@ -51,6 +51,26 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* Stop the page zooming around while it is being tapped.
+ *
+ * `touch-action: manipulation` is the one that matters: it removes the
+ * double-tap-to-zoom gesture, which is what fires when somebody taps two
+ * buttons in quick succession and is the usual cause of a page lurching
+ * about. iOS Safari ignores user-scalable=no in the viewport tag, so this is
+ * the part that actually works there.
+ *
+ * Pinch-to-zoom is deliberately still allowed on iOS. Taking it away breaks
+ * the app for anyone who needs to magnify small print, and it was never the
+ * thing causing trouble. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { touch-action: manipulation; overscroll-behavior-y: contain; }
+button, .chip, .tab, .leg-fix button, .tabbar button, label, select { touch-action: manipulation; }
+
+/* iOS zooms into any input whose text is under 16px when it gets focus, and
+ * then does not zoom back out. Every field here is at least 16px for that
+ * reason alone; the leg rows were 15px and would have done it. */
+input, select, textarea { font-size: 16px; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -581,14 +601,26 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 .entry { display: flex; flex-direction: column; gap: 14px; }
 .entry-legs { display: flex; flex-direction: column; gap: 10px; }
-.entry-leg-top { display: grid; grid-template-columns: 74px 1fr 64px auto; gap: 7px; align-items: center; }
+.entry-leg-top { display: grid; grid-template-columns: 82px 1fr 72px auto; gap: 7px; align-items: center; }
+
+/* On a phone the selection is the long field and the other three are small,
+ * so the selection takes a line of its own. Sharing one line left it about
+ * 116px wide, which is not enough to see "Jalen Brunson Over 24.5 Points"
+ * while typing it. */
+@media (max-width: 460px) {
+  .entry-leg-top { grid-template-columns: 1fr 76px auto; }
+  .entry-leg-top .entry-text { grid-column: 1 / -1; order: -1; }
+  .entry-read, .entry-quote { padding-left: 2px; }
+}
+/* 16px, not 15: iOS zooms into any input with smaller text the moment it is
+ * focused, and does not zoom back out afterwards. */
 .entry-leg-top select,
 .entry-leg-top input {
   background: var(--surface-2); border: 1.5px solid var(--line);
-  border-radius: 9px; padding: 11px 10px;
-  color: var(--text); font-size: 15px; font-family: inherit; min-width: 0;
+  border-radius: 9px; padding: 11px 8px;
+  color: var(--text); font-size: 16px; font-family: inherit; min-width: 0;
 }
-.entry-leg-top select { appearance: none; text-align: center; font-weight: 700; font-size: 13px; }
+.entry-leg-top select { appearance: none; text-align: center; font-weight: 700; }
 .entry-leg-top input:focus,
 .entry-leg-top select:focus { outline: none; border-color: var(--green-deep); }
 .entry-odds { text-align: center; font-variant-numeric: tabular-nums; font-weight: 700; }
@@ -597,7 +629,24 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* The parser's readback, shown while typing. If the app cannot tell what you
  * meant it says so now, not at grading time when money is committed. */
-.entry-read { font-size: 12px; padding: 4px 0 0 81px; }
+.entry-read { font-size: 12px; padding: 4px 0 0 89px; }
+
+/* What the book is actually paying, offered rather than silently applied so
+ * the number is always traceable to a source. */
+.entry-quote {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  padding: 7px 0 0 89px; font-size: 12px; color: var(--dim);
+}
+/* Taking the offered price is the fastest path through this form, so the
+ * button is sized to be hit with a thumb rather than aimed at. */
+.entry-quote button {
+  padding: 9px 14px; border-radius: var(--r-pill); min-height: 38px;
+  border: 1.5px solid var(--green-deep); color: var(--green);
+  font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums;
+}
+.entry-quote button:hover { background: var(--green-bg); }
+.entry-quote .warn { color: var(--gold); }
+.entry-quote.none { color: var(--mute); }
 .entry-read.ok { color: var(--green); }
 .entry-read.bad { color: var(--gold); }
 

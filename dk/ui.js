@@ -362,10 +362,18 @@ export function chipsHTML(items, active) {
   </div>`;
 }
 
+/**
+ * The bottom bar.
+ *
+ * These labels are exactly the views the app has, and exactly what the top
+ * tabs say. An earlier version had Home and Board down here mapping onto My
+ * Locks and League, which meant the highlight never matched where you were
+ * and two buttons did the same thing as two others.
+ */
 export function tabBarHTML(active = 'Live', badges = {}) {
   const items = [
-    ['Home', ICONS.home], ['Live', ICONS.live], ['My Locks', ICONS.locks],
-    ['Board', ICONS.board], ['Add', ICONS.add],
+    ['My Locks', ICONS.locks], ['Live', ICONS.live],
+    ['League', ICONS.board], ['Add', ICONS.add],
   ];
   return `<nav class="tabbar">${items.map(([label, svg]) => `
     <button aria-selected="${label === active}">

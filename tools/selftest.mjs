@@ -11,6 +11,7 @@ const ok = report({
   nba: fx('nba_final_okc.json'),
   cfb: fx('cfb_labels_keys_mismatch.json'),
   nflBoard: fx('nfl_scoreboard.json'),
+  nbaOddsBoard: fx('nba_scoreboard_odds.json'),
 });
 
 process.exit(ok ? 0 : 1);

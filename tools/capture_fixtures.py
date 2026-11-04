@@ -74,6 +74,7 @@ def trim_scoreboard(d):
             "competitions": [{
                 "date": c.get("date"),
                 "status": c.get("status"),
+                "odds": c.get("odds"),
                 "competitors": [{
                     "homeAway": t.get("homeAway"),
                     "winner": t.get("winner"),
@@ -85,8 +86,17 @@ def trim_scoreboard(d):
     return {"events": events}
 
 
-def write(name, obj):
+def write(name, obj, frozen=False):
     path = os.path.normpath(os.path.join(OUT, name))
+    # A frozen fixture is captured once and never regenerated, because the
+    # thing it proves is not in the feed any more. The odds board is the
+    # case: ESPN carries betting lines only while a game is still "pre", so
+    # re-capturing it the next day would quietly replace a board full of
+    # prices with one that has none, and the pricing tests would pass while
+    # asserting nothing.
+    if frozen and os.path.exists(path):
+        print("  %-34s frozen, kept as captured" % name)
+        return
     text = json.dumps(obj, indent=1, sort_keys=False, ensure_ascii=False)
     with io.open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text + "\n")
@@ -112,4 +122,12 @@ if __name__ == "__main__":
     for path, name in (("football/nfl", "nfl_scoreboard.json"),
                        ("basketball/nba", "nba_scoreboard.json")):
         write(name, trim_scoreboard(get("%s/%s/scoreboard" % (BASE, path))))
+
+    # A board of games that have not started, so it still carries the
+    # moneyline, spread and total the entry form quotes from. Captured
+    # 2026-11-04 with all 14 games priced by DraftKings. Frozen: see write().
+    print("odds board:")
+    write("nba_scoreboard_odds.json",
+          trim_scoreboard(get("%s/basketball/nba/scoreboard?dates=20261104" % BASE)),
+          frozen=True)
     print("done")

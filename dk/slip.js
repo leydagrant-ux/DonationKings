@@ -10,9 +10,9 @@
 // person then checks before anything is saved, so a misread line costs a tap
 // rather than a wrong settlement.
 
-import { parseLegText, matchStat } from './resolve.js';
+import { parseLegText, matchStat, resolveTeam } from './resolve.js';
 import { parseAmerican } from './odds.js';
-import { LEAGUES } from './espn.js';
+import { LEAGUES, priceFor } from './espn.js';
 
 /** Money, in cents, from "$1,234.56" / "1234.56" / "$25". */
 export function parseMoney(text) {
@@ -221,6 +221,93 @@ export function parseSlip(raw) {
     picks,
     declaredLegs,
     warnings,
+  };
+}
+
+/**
+ * Look up the real price for a typed leg, so nobody has to know the Knicks
+ * are -220 tonight.
+ *
+ * Only game-level markets can be answered: the score feed carries a book's
+ * moneyline, spread and total, and nothing else. Player props are not in it
+ * at any price, so those come back as `unavailable` and the form says so
+ * rather than leaving a blank box looking broken.
+ *
+ * The line is returned alongside the price because a spread or total written
+ * without one ("Celtics spread") is only meaningful once it says -11.5, and
+ * because a typed line that disagrees with the book's is worth showing.
+ */
+export function suggestOdds(text, league, events) {
+  const sport = (LEAGUES[league] || {}).sport || 'football';
+  const parsed = parseLegText(String(text || ''), sport);
+  if (!parsed.market) return null;
+
+  const pool = (events || []).filter((e) => e.league === league);
+  if (!pool.length) return null;
+
+  // The free feed carries exactly three markets: both sides of the
+  // moneyline, both sides of the spread, and the game total. Everything else
+  // says so outright, because an empty price box with no explanation reads as
+  // a broken app rather than a limit of the data.
+  const GAME_MARKETS = new Set(['moneyline', 'spread', 'game_total']);
+  if (!GAME_MARKETS.has(parsed.market)) {
+    return {
+      unavailable: true,
+      market: parsed.market,
+      reason: parsed.market === 'team_total'
+        ? 'Team totals are not in the free odds feed.'
+        : 'Player prop prices are not in the free odds feed.',
+    };
+  }
+
+  let event = null;
+  let teamAbbr = null;
+  if (parsed.market === 'game_total') {
+    // A total has no side to pick, so the game comes from the matchup the
+    // text names, if it named one ("Knicks vs Bulls Over 233.5"). Otherwise
+    // it is only unambiguous when a single game on the slate is priced:
+    // quoting a total against the wrong game would be worse than quoting
+    // nothing, because the number looks authoritative either way.
+    if (parsed.subjectRaw) {
+      const t = resolveTeam(parsed.subjectRaw, pool);
+      event = t.eventId ? pool.find((e) => e.eventId === t.eventId) || null : null;
+    }
+    if (!event) {
+      const withOdds = pool.filter((e) => e.odds && e.odds.total && e.odds.total.line !== null);
+      if (withOdds.length !== 1) return null;
+      event = withOdds[0];
+    }
+  } else {
+    const t = resolveTeam(parsed.subjectRaw, pool);
+    // No side means the text named both teams, and a moneyline or spread
+    // price belongs to one of them. Nothing to quote.
+    if (!t.eventId || !t.teamAbbr) return null;
+    event = pool.find((e) => e.eventId === t.eventId) || null;
+    teamAbbr = t.teamAbbr;
+  }
+  if (!event || !event.odds) return null;
+
+  const got = priceFor(event, { market: parsed.market, side: parsed.side, teamAbbr });
+  if (got === null || got === undefined) return null;
+
+  const odds = typeof got === 'number' ? got : got.odds;
+  const line = typeof got === 'number' ? null : got.line;
+  if (odds === null || odds === undefined) return null;
+
+  return {
+    odds,
+    line,
+    market: parsed.market,
+    side: parsed.side,
+    teamAbbr,
+    provider: event.odds.provider,
+    event: event.shortName || event.name,
+    startAt: event.startAt,
+    // A typed line that is not the book's current one is worth flagging: the
+    // price belongs to the book's number, not the one in the text.
+    lineMismatch: parsed.line !== null && parsed.line !== undefined && line !== null
+      && Math.abs(Math.abs(parsed.line) - Math.abs(line)) > 0.001,
+    typedLine: parsed.line === undefined ? null : parsed.line,
   };
 }
 

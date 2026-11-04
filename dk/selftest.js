@@ -1184,11 +1184,141 @@ function testSlip(t) {
 }
 
 // ---------------------------------------------------------------------------
+// Pricing the entry form off the live board
+// ---------------------------------------------------------------------------
+
+/**
+ * The quoted price has to belong to the side that was actually typed.
+ *
+ * This is the one place in the app where a silent error hands somebody the
+ * wrong number and the app looks confident doing it: quoting the favorite's
+ * -597 on a bet for the +443 underdog would misstate the payout of every
+ * lock that took the price. So the side assignment is checked against every
+ * game on a real board rather than one worked example.
+ */
+function testPricing(t, fx) {
+  const events = E.eventsFromScoreboard(fx.nbaOddsBoard, 'nba');
+
+  t.section('pricing: the board carries lines');
+  t.ok('every game on this board is priced', events.length > 0 && events.every((e) => e.odds));
+  t.ok('the book is named', events.every((e) => e.odds.provider));
+  t.ok('both moneylines are there', events.every((e) => e.odds.moneyline.home !== null && e.odds.moneyline.away !== null));
+  t.ok(
+    'the two spread lines are opposite numbers',
+    events.every((e) => {
+      const s = e.odds.spread;
+      return !s.home || !s.away || Math.abs(s.home.line + s.away.line) < 0.001;
+    }),
+  );
+  t.ok(
+    'over and under share one line',
+    events.every((e) => e.odds.total.line === null || typeof e.odds.total.line === 'number'),
+  );
+
+  t.section('pricing: the quote matches the side typed');
+  // Both sides of every game, by the name a person would actually type.
+  let checkedML = 0;
+  let wrongML = 0;
+  let checkedSpread = 0;
+  let wrongSpread = 0;
+  for (const ev of events) {
+    for (const side of ['home', 'away']) {
+      const team = ev[side];
+      // `shortName` is the nickname on its own ("Knicks"), which is how a slip
+      // and a person both write it.
+      const q = SL.suggestOdds(`${team.shortName} ML`, 'nba', events);
+      if (q && !q.unavailable) {
+        checkedML++;
+        if (q.odds !== ev.odds.moneyline[side]) wrongML++;
+      }
+      const sp = ev.odds.spread[side];
+      if (sp && sp.line !== null) {
+        const typed = `${team.shortName} ${sp.line > 0 ? '+' : ''}${sp.line}`;
+        const qs = SL.suggestOdds(typed, 'nba', events);
+        if (qs && !qs.unavailable) {
+          checkedSpread++;
+          if (qs.odds !== sp.odds || qs.line !== sp.line) wrongSpread++;
+        }
+      }
+    }
+  }
+  t.ok(`moneylines were quoted (${checkedML} of ${events.length * 2})`, checkedML >= events.length);
+  t.eq('and every one is the price for that exact team', wrongML, 0);
+  t.ok(`spreads were quoted (${checkedSpread})`, checkedSpread > 0);
+  t.eq('and every one is that team\'s line and price', wrongSpread, 0);
+
+  t.section('pricing: game totals');
+  // A total names no side, so the game comes from the matchup in the text.
+  const ny = events.find((e) => (e.shortName || '').includes('NY'));
+  if (ny) {
+    const line = ny.odds.total.line;
+    const q = SL.suggestOdds(`${ny.away.shortName} vs ${ny.home.shortName} Over ${line}`, 'nba', events);
+    t.ok('a "vs" matchup finds its game', !!q && q.event === ny.shortName);
+    t.eq('and quotes the over', q && q.odds, ny.odds.total.over);
+    t.eq('at the book\'s line', q && q.line, line);
+    const u = SL.suggestOdds(`${ny.away.shortName}/${ny.home.shortName} Under ${line}`, 'nba', events);
+    t.eq('a slash matchup quotes the under', u && u.odds, ny.odds.total.under);
+    const abbr = SL.suggestOdds(`${ny.shortName} Over ${line}`, 'nba', events);
+    t.ok('and abbreviations work too', !!abbr && abbr.event === ny.shortName);
+  }
+  // With a full slate and no matchup named, there is nothing to quote: a
+  // total pinned to the wrong game would look just as authoritative.
+  t.eq('a bare total on a full slate quotes nothing', SL.suggestOdds('Over 220.5', 'nba', events), null);
+  t.ok(
+    'but a one-game slate is unambiguous',
+    (() => {
+      const one = events.slice(0, 1);
+      const q = SL.suggestOdds(`Over ${one[0].odds.total.line}`, 'nba', one);
+      return !!q && q.odds === one[0].odds.total.over;
+    })(),
+  );
+
+  t.section('pricing: a matchup is not a side');
+  // Naming both teams pins the game but not the team, and a moneyline has to
+  // be graded for one of them.
+  if (ny) {
+    const both = `${ny.away.shortName} vs ${ny.home.shortName}`;
+    const r = R.resolveLeg({ rawText: both }, { league: 'nba', events, snapshots: [] });
+    t.eq('a two-team moneyline does not resolve', r.teamAbbr, undefined);
+    t.eq('but the game it belongs to is known', r.eventId, ny.eventId);
+    t.ok('and the reason says why', /both teams/.test(r.reason || ''));
+    t.eq('nothing is quoted for it', SL.suggestOdds(both + ' ML', 'nba', events), null);
+  }
+
+  t.section('pricing: what the feed does not carry');
+  const prop = SL.suggestOdds('Jalen Brunson Over 24.5 Points', 'nba', events);
+  t.ok('a player prop is reported unavailable', !!prop && prop.unavailable === true);
+  t.ok('with a reason to show', /player prop/i.test((prop && prop.reason) || ''));
+  const tt = SL.suggestOdds('Knicks Over 115.5', 'nba', events);
+  t.ok('a team total is reported unavailable', !!tt && tt.unavailable === true);
+  t.ok('and says so specifically', /team total/i.test((tt && tt.reason) || ''));
+
+  t.section('pricing: a typed line that is not the book\'s');
+  if (ny) {
+    const sp = ny.odds.spread.home;
+    if (sp && sp.line !== null) {
+      const off = sp.line + 1; // a stale number off the slip
+      const q = SL.suggestOdds(`${ny.home.shortName} ${off > 0 ? '+' : ''}${off}`, 'nba', events);
+      t.ok('the mismatch is flagged', !!q && q.lineMismatch === true);
+      t.eq('the book\'s line is what gets quoted', q && q.line, sp.line);
+      t.eq('and the typed one is kept to show', q && q.typedLine, off);
+    }
+  }
+
+  t.section('pricing: nothing to price against');
+  t.eq('no events, no quote', SL.suggestOdds('Knicks ML', 'nba', []), null);
+  t.eq('a league with no games on the board', SL.suggestOdds('Packers ML', 'nfl', events), null);
+  t.eq('unparseable text', SL.suggestOdds('asdf', 'nba', events), null);
+  t.eq('empty text', SL.suggestOdds('', 'nba', events), null);
+  t.ok('and none of that throws', true);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /**
- * fixtures: { nfl, nba, cfb, nflBoard } of parsed ESPN JSON.
+ * fixtures: { nfl, nba, cfb, nflBoard, nbaOddsBoard } of parsed ESPN JSON.
  * Returns { results, passed, failed, ms }.
  */
 export function runAll(fixtures) {
@@ -1202,6 +1332,7 @@ export function runAll(fixtures) {
   testLeague(t);
   testStore(t, snaps);
   testSlip(t);
+  testPricing(t, fixtures);
   const ms = Date.now() - t0;
   const passed = t.results.filter((r) => r.pass).length;
   return { results: t.results, passed, failed: t.results.length - passed, ms };

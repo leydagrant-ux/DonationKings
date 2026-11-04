@@ -8,6 +8,7 @@
 
 import { esc, money, americanStr, ICONS } from './ui.js';
 import { parseLegText, matchStat } from './resolve.js';
+import { suggestOdds } from './slip.js';
 import { parlayDecimal, boostedReturnCents, impliedProb, parseAmerican } from './odds.js';
 import { LEAGUES } from './espn.js';
 
@@ -40,12 +41,16 @@ function readback(pick) {
   else if (p.market === 'player_yes_no') bits.push(stat === 'anytimeTd' ? 'anytime touchdown' : String(stat));
   else if (p.market === 'first_td') bits.push('first touchdown');
   else if (p.market === 'player_ou') bits.push(`${p.side} ${p.line} ${stat}`);
-  if (p.subjectRaw && p.market !== 'game_total') bits.unshift(p.subjectRaw);
+  // A game total usually has no subject, but it does when the text named the
+  // matchup, and that is worth showing: it is how you can tell at a glance
+  // that the right game was found.
+  if (p.subjectRaw) bits.unshift(p.subjectRaw);
   return { kind: 'ok', label: bits.join(' · ') };
 }
 
-function legRowHTML(pick, i, count) {
+function legRowHTML(pick, i, count, events) {
   const r = readback(pick);
+  const quote = pick.text && pick.text.trim() ? suggestOdds(pick.text, pick.league, events) : null;
   return `<div class="entry-leg" data-i="${i}">
     <div class="entry-leg-top">
       <select class="entry-sport" data-i="${i}" aria-label="League">
@@ -58,6 +63,28 @@ function legRowHTML(pick, i, count) {
       ${count > 1 ? `<button class="entry-del" data-action="del-leg" data-i="${i}" aria-label="Remove leg">✕</button>` : ''}
     </div>
     ${r.kind !== 'empty' ? `<div class="entry-read ${r.kind}">${r.kind === 'ok' ? '' : '⚠ '}${esc(r.label)}</div>` : ''}
+    ${quoteHTML(quote, i)}
+  </div>`;
+}
+
+/**
+ * What the book currently says, under the leg.
+ *
+ * Shown rather than silently filled so the price is always traceable to a
+ * source and a moment. An offered price can be taken with one tap; a player
+ * prop says plainly that the feed does not carry one, instead of leaving an
+ * empty box that looks broken.
+ */
+function quoteHTML(q, i) {
+  if (!q) return '';
+  if (q.unavailable) {
+    return `<div class="entry-quote none">${esc(q.reason)} Type it from your slip.</div>`;
+  }
+  const line = q.line === null ? '' : ` ${q.market === 'game_total' ? '' : (q.line > 0 ? '+' : '')}${q.line}`;
+  return `<div class="entry-quote">
+    <button data-action="use-odds" data-i="${i}" data-odds="${esc(q.odds)}">Use ${americanStr(q.odds)}</button>
+    <span>${esc(q.provider || 'book')}${esc(line)}${q.event ? ` · ${esc(q.event)}` : ''}</span>
+    ${q.lineMismatch ? `<span class="warn">you typed ${esc(q.typedLine)}, the book has ${esc(q.line)}</span>` : ''}
   </div>`;
 }
 
@@ -111,7 +138,7 @@ export function scanConfirmHTML({ transcript, preview, slip, model }) {
   </div>`;
 }
 
-export function entryFormHTML(draft, leagues) {
+export function entryFormHTML(draft, leagues, events) {
   const odds = draft.picks.map((p) => parseAmerican(p.odds)).filter((o) => o !== null);
   const complete = draft.picks.filter((p) => String(p.text || '').trim() && parseAmerican(p.odds) !== null);
   const priced = complete.length === draft.picks.length && draft.picks.length > 0;
@@ -128,7 +155,7 @@ export function entryFormHTML(draft, leagues) {
 
     <div class="field">
       <span>Legs</span>
-      <div class="entry-legs">${draft.picks.map((p, i) => legRowHTML(p, i, draft.picks.length)).join('')}</div>
+      <div class="entry-legs">${draft.picks.map((p, i) => legRowHTML(p, i, draft.picks.length, events)).join('')}</div>
       <button class="ghostbtn" data-action="add-leg">${ICONS.add} Add leg</button>
     </div>
 
