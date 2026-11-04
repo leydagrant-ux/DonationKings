@@ -10,8 +10,10 @@ bankroll for the week.
 
 ## Where it stands
 
-**Build steps 1, 2 and 3 are DONE and DEPLOYED.** 485 checks pass across three
-suites.
+**SHIPPED.** Live at <https://leydagrant-ux.github.io/DonationKings/>, backed
+by a deployed Worker and D1. 485 checks pass across three suites.
+
+Build steps 1, 2 and 3 are done.
 
 The backend is live. Firebase project `donationkings`, Worker at
 <https://donationkings-api.leydagrant.workers.dev>, D1 database `donationkings`
@@ -31,6 +33,20 @@ Two disposable test accounts are left in Firebase Authentication
 (`dk-test-a@example.com`, `dk-test-b@example.com`). Delete them from the
 Firebase console; nothing depends on them. Their credentials are in
 `tools/test-accounts.local.json`, which should not be committed.
+
+Verified from the public origin on 2026-11-04: signed in at
+`https://leydagrant-ux.github.io`, loaded league `34PXMF` with both members and
+the standings, no console errors. The Worker accepts that origin and Firebase
+authorizes that domain.
+
+Repo: <https://github.com/leydagrant-ux/DonationKings> (public, which GitHub
+Pages requires on a free account). The Firebase web config in `dk/config.js` is
+public by design and authorizes nothing; the Worker verifies a signed token on
+every request.
+
+GitHub's Pages runners sat Queued for about six minutes on the first deploy.
+That is normal and not a misconfiguration. Watch
+`/actions` rather than polling the URL.
 
 See [SETUP.md](SETUP.md) for the live values and, importantly, the D1 import
 endpoint gotcha that `--file` hits.
