@@ -398,7 +398,10 @@ root.addEventListener('click', async (e) => {
     if (!r.ok) return toast(r.error || 'Could not create that league.');
     setState({ ...state, ui: { ...state.ui, showForms: false, tab: 'League' } });
     if (be.kind === 'cloud') await sync();
-    else setState({ ...state, membership: L.setActive(state.membership, r.league.code) });
+    // Switch to the league just made, in both modes. Without this the server
+    // reload keeps whatever was already active, so you create a league and
+    // the screen still shows the old one, invite code included.
+    setState({ ...state, membership: L.setActive(state.membership, r.league.code) });
     return toast(`${name} created. Share code ${r.league.code}.`);
   }
 
