@@ -181,8 +181,16 @@ function myBankroll() {
 
 function authViewHTML() {
   const up = authMode === 'up';
+  // Somebody arriving from an invite link should be told that is what is
+  // happening, rather than being shown a bare sign-in box and left to guess.
+  let invited = null;
+  try { invited = sessionStorage.getItem('dk.pendingJoin'); } catch { invited = null; }
+
   return `<div class="section"><h2>${up ? 'Make an account' : 'Sign in'}</h2>
-    <p>${up ? 'So your friends can see your locks on the standings.' : 'Your leagues follow you to any device.'}</p></div>
+    <p>${invited
+      ? `You have been invited to a league. ${up ? 'Make an account' : 'Sign in'} and you will join it straight away.`
+      : (up ? 'So your friends can see your locks on the standings.' : 'Your leagues follow you to any device.')}</p></div>
+    ${invited ? `<div class="notice">Joining league <b>${UI.esc(invited)}</b> once you are in.</div>` : ''}
     <div class="card form">
       ${up ? `<label class="field"><span>Name</span>
         <input id="au-name" placeholder="Grant" maxlength="30" autocomplete="name"></label>` : ''}
@@ -649,6 +657,10 @@ async function boot() {
       sessionStorage.setItem('dk.pendingJoin', join);
     }
   }
+
+  // A friend arriving from an invite link almost certainly has no account
+  // yet, so open on sign-up rather than making them find the toggle.
+  try { if (sessionStorage.getItem('dk.pendingJoin')) authMode = 'up'; } catch { /* private window */ }
 
   render();
 
