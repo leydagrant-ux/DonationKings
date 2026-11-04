@@ -1,0 +1,11 @@
+{
+  "name": "DonationKings",
+  "short_name": "DonationKings",
+  "description": "Track parlays and run a weekly bankroll league with your friends.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "portrait"
+}

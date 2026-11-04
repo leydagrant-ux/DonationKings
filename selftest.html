@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DonationKings selftest</title>
+<style>
+  :root {
+    --bg: #11161c; --panel: #171e26; --line: #27313d;
+    --text: #e7edf4; --dim: #8697a8;
+    --ok: #3fb950; --bad: #f85149; --accent: #d8a33a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; }
+  h1 { font-size: 16px; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--dim); margin-bottom: 18px; font-size: 12px; }
+  #summary { position: sticky; top: 0; z-index: 2; background: var(--panel); border: 1px solid var(--line);
+             border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 14px; }
+  #summary.pass { border-color: var(--ok); }
+  #summary.fail { border-color: var(--bad); }
+  .n { font-weight: 700; }
+  .n.ok { color: var(--ok); } .n.bad { color: var(--bad); }
+  .sec { margin: 18px 0 6px; color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+  .row { display: flex; gap: 10px; padding: 2px 0; align-items: baseline; }
+  .tag { flex: 0 0 auto; width: 34px; font-weight: 700; }
+  .tag.ok { color: var(--ok); } .tag.bad { color: var(--bad); }
+  .row.bad { background: #2b1618; margin: 0 -6px; padding: 2px 6px; border-radius: 4px; }
+  .detail { color: var(--dim); }
+  .detail b { color: var(--bad); font-weight: 400; }
+  #failures:not(:empty) { border: 1px solid var(--bad); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; }
+  #failures h2 { font-size: 12px; margin: 0 0 6px; color: var(--bad); text-transform: uppercase; letter-spacing: .08em; }
+</style>
+</head>
+<body>
+<h1>DonationKings selftest</h1>
+<div class="sub">odds &middot; espn &middot; resolve &middot; grade &middot; parlay. Fixtures are real ESPN payloads under <code>fixtures/</code>.</div>
+<div id="summary">running&hellip;</div>
+<div id="failures"></div>
+<div id="out"></div>
+
+<script type="module">
+import { runAll } from './dk/selftest.js';
+
+const FIXTURES = {
+  nfl: 'nfl_final_car_gb.json',
+  nba: 'nba_final_okc.json',
+  cfb: 'cfb_labels_keys_mismatch.json',
+  nflBoard: 'nfl_scoreboard.json',
+};
+
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+function rowHTML(r) {
+  return `<div class="row ${r.pass ? '' : 'bad'}">`
+    + `<span class="tag ${r.pass ? 'ok' : 'bad'}">${r.pass ? 'ok' : 'FAIL'}</span>`
+    + `<span>${esc(r.name)}${r.detail ? ` <span class="detail">&larr; ${esc(r.detail)}</span>` : ''}</span>`
+    + `</div>`;
+}
+
+try {
+  const entries = await Promise.all(
+    Object.entries(FIXTURES).map(async ([key, file]) => {
+      const res = await fetch(`./fixtures/${file}`);
+      if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`);
+      return [key, await res.json()];
+    })
+  );
+  const { results, passed, failed, ms } = runAll(Object.fromEntries(entries));
+
+  // Title carries the result so a headless browser can read it without
+  // parsing the page. Same trick as the sibling projects' suites.
+  document.title = failed ? `✗ ${failed} failed` : `✓ ${passed} passed`;
+
+  const summary = document.getElementById('summary');
+  summary.className = failed ? 'fail' : 'pass';
+  summary.innerHTML = `<span class="n ${failed ? 'bad' : 'ok'}">${failed ? '✗' : '✓'}</span> `
+    + `<span class="n ok">${passed}</span> passed, `
+    + `<span class="n ${failed ? 'bad' : ''}">${failed}</span> failed, `
+    + `${results.length} checks in ${ms}ms`;
+
+  // Failures repeated at the top, so a long run does not hide them.
+  if (failed) {
+    document.getElementById('failures').innerHTML =
+      '<h2>failures</h2>' + results.filter((r) => !r.pass)
+        .map((r) => rowHTML({ ...r, name: `${r.section}: ${r.name}` })).join('');
+  }
+
+  let html = '';
+  let section = '';
+  for (const r of results) {
+    if (r.section !== section) { html += `<div class="sec">${esc(r.section)}</div>`; section = r.section; }
+    html += rowHTML(r);
+  }
+  document.getElementById('out').innerHTML = html;
+} catch (err) {
+  document.title = '✗ harness error';
+  const summary = document.getElementById('summary');
+  summary.className = 'fail';
+  summary.textContent = `harness error: ${err.message}`;
+  console.error(err);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>DonationKings</title>
+<link rel="stylesheet" href="./dk/theme.css">
+</head>
+<body>
+<div id="app"></div>
+
+<script type="module">
+/* Design preview. Every lock card on this page is built by writing a bet as
+ * plain text, running it through the real parser, resolver and grader against
+ * real ESPN payloads, and rendering the result. The standings are computed by
+ * the real league module from those same locks. Nothing is mocked, so if
+ * something looks wrong the engine is wrong. */
+
+import { snapshotFromSummary } from './dk/espn.js';
+import { resolveLeg } from './dk/resolve.js';
+import { gradeLeg, STATE } from './dk/grade.js';
+import { settleParlay } from './dk/parlay.js';
+import { parlayDecimal, totalReturnCents, boostedReturnCents, impliedProb } from './dk/odds.js';
+import * as UI from './dk/ui.js';
+import * as LG from './dk/ui-league.js';
+import * as L from './dk/league.js';
+
+const ME = 'u-grant';
+const WEEK = L.currentWeekKey();
+
+const FIX = {
+  nfl: ['nfl_final_car_gb.json', 'nfl'],
+  nba: ['nba_final_okc.json', 'nba'],
+  cfb: ['cfb_labels_keys_mismatch.json', 'cfb'],
+};
+const load = async ([file, league]) =>
+  snapshotFromSummary(await (await fetch(`./fixtures/${file}`)).json(), league);
+
+const snaps = {};
+for (const [key, spec] of Object.entries(FIX)) snaps[key] = await load(spec);
+
+const eventsFrom = (list) => list.map((s) => ({
+  eventId: s.eventId, league: s.league, startAt: s.startAt,
+  state: s.state, home: s.home, away: s.away,
+}));
+
+/** Write a lock the way a book prints it, then let the engine do the rest. */
+function buildLock({ picks, stakeCents, boostPct, placedAt, eligible, uid, code }) {
+  const events = eventsFrom(Object.values(snaps));
+
+  const legs = picks.map(({ text, league, odds }) => {
+    const snap = snaps[league];
+    const leg = resolveLeg({ rawText: text }, { league, events, snapshots: [snap] });
+    leg.oddsAmerican = odds;
+    return { leg, snapshot: snap, verdict: gradeLeg(leg, snap) };
+  });
+
+  const priced = legs.map((l) => ({ oddsAmerican: l.leg.oddsAmerican, state: l.verdict.state }));
+  const settled = settleParlay(priced, stakeCents);
+  const dec = parlayDecimal(picks.map((p) => p.odds));
+
+  // A boost lifts profit only, over whatever survived after pushed legs.
+  const paid = settled.returnCents === null || settled.returnCents === 0
+    ? settled.returnCents
+    : boostedReturnCents(stakeCents, settled.dec, boostPct);
+
+  return {
+    // what the card needs
+    title: UI.lockTitle(legs.length),
+    legs,
+    roll: settled,
+    stakeCompCents: stakeCents,
+    returnCents: paid,
+    toWinCents: boostedReturnCents(stakeCents, dec, boostPct),
+    impliedPct: Math.round(impliedProb(dec) * 1000) / 10,
+    boostPct,
+    placedAt,
+    eligible,
+    live: legs.some((l) => l.snapshot.state === 'in'),
+    correlated: new Set(legs.map((l) => l.leg.eventId)).size < legs.length,
+    // what the league needs
+    uid: uid || ME,
+    code: code || 'DEGEN7',
+    weekKey: WEEK,
+    state: settled.state,
+    settledAt: settled.final ? placedAt + 7200000 : null,
+  };
+}
+
+/* ---- Grant's locks, graded for real -------------------------------- */
+
+const myLocks = [
+  // The marquee trap, made visible: the quarterback threw three touchdowns
+  // and scored none, so his anytime leg is the X that kills the lock.
+  buildLock({
+    stakeCents: 1000, placedAt: Date.now() - 86400000 * 2,
+    picks: [
+      { text: `${snaps.nfl.home.shortName} ML`, league: 'nfl', odds: -165 },
+      { text: 'Tucker Kraft Anytime TD', league: 'nfl', odds: 260 },
+      { text: 'Jordan Love Anytime TD', league: 'nfl', odds: 750 },
+      { text: 'Josh Jacobs 2+ Rushing TDs', league: 'nfl', odds: 420 },
+    ],
+  }),
+  // The winner, with the brass frame.
+  buildLock({
+    stakeCents: 2470, boostPct: 10, placedAt: Date.now() - 86400000 * 2 - 3600000,
+    picks: [
+      { text: 'Josh Jacobs Anytime TD', league: 'nfl', odds: -115 },
+      { text: 'Tucker Kraft Anytime TD', league: 'nfl', odds: 260 },
+    ],
+  }),
+  // A live lock: a progress bar per leg, which is the thing a sportsbook app
+  // does not give you.
+  buildLock({
+    stakeCents: 500, placedAt: Date.now() - 5400000,
+    picks: [
+      { text: `${snaps.cfb.home.shortName} ML`, league: 'cfb', odds: -140 },
+      { text: 'Total Points Over 30.5', league: 'cfb', odds: -110 },
+      { text: `${snaps.cfb.away.shortName} Team Total Over 12.5`, league: 'cfb', odds: -105 },
+    ],
+  }),
+  // A void: the book refunds a prop on a player who never dressed, so the
+  // lock reprices to the surviving leg rather than losing.
+  buildLock({
+    stakeCents: 1500, placedAt: Date.now() - 86400000, eligible: false,
+    picks: [
+      { text: 'Brooks Barnhizer Over 5.5 Points', league: 'nba', odds: -120 },
+      { text: `${snaps.nba.away.shortName} ML`, league: 'nba', odds: -135 },
+    ],
+  }),
+];
+
+/* ---- Two leagues, so the switcher has something to switch ------------ */
+
+let degen = L.createLeague({ name: 'Sunday Degenerates', ownerUid: ME, ownerName: 'Grant', code: 'DEGEN7', now: Date.now() - 86400000 * 30 });
+for (const [uid, name] of [['u-ck', 'ckirby'], ['u-ash', 'Ashtin'], ['u-dw', 'Dalton Ward']]) {
+  degen = L.joinLeague(degen, { uid, name }).league;
+}
+let work = L.createLeague({ name: 'Work League', ownerUid: 'u-boss', ownerName: 'Marcus Hale', code: 'MCGH42', now: Date.now() - 86400000 * 9 });
+for (const [uid, name] of [[ME, 'Grant'], ['u-tj', 'TJ Nelson']]) {
+  work = L.joinLeague(work, { uid, name }).league;
+}
+
+/* Everyone else's week. These carry only the summary fields the standings
+ * need; they are not graded, because grading them would need a fixture per
+ * game they bet. Grant's rows above are the fully graded ones. */
+const other = (uid, stake, state, ret) => ({
+  code: 'DEGEN7', uid, weekKey: WEEK, stakeCompCents: stake, state,
+  returnCents: ret, settledAt: Date.now() - 3600000,
+});
+/** Previous weeks, so the history list and all-time have real depth. */
+const prevWeeks = (() => {
+  const keys = [];
+  const d = L.weekStart(WEEK);
+  for (let i = 1; i <= 3; i++) {
+    const back = new Date(d); back.setDate(d.getDate() - 7 * i);
+    keys.push(L.isoWeekKey(back));
+  }
+  const out = [];
+  const plan = [
+    // [week index, uid, stake, state, return]
+    [0, ME, 2500, 'lost', 0], [0, 'u-ck', 2000, 'won', 11000], [0, 'u-ash', 1500, 'lost', 0], [0, 'u-dw', 1000, 'won', 2400],
+    [1, ME, 1800, 'won', 9400], [1, 'u-ck', 3000, 'lost', 0], [1, 'u-ash', 2000, 'won', 3600], [1, 'u-dw', 2500, 'lost', 0],
+    [2, ME, 1200, 'lost', 0], [2, 'u-ck', 1000, 'lost', 0], [2, 'u-ash', 4000, 'won', 16000], [2, 'u-dw', 3000, 'lost', 0],
+  ];
+  for (const [wi, uid, stake, state, ret] of plan) {
+    out.push({ ...other(uid, stake, state, ret), weekKey: keys[wi] });
+  }
+  return out;
+})();
+
+const leagueLocks = [
+  ...myLocks,
+  other('u-ck', 2000, 'won', 5600), other('u-ck', 1500, 'lost', 0), other('u-ck', 1000, 'lost', 0),
+  other('u-ash', 3000, 'lost', 0), other('u-ash', 2500, 'lost', 0), other('u-ash', 1200, 'won', 2900),
+  other('u-dw', 4000, 'lost', 0), other('u-dw', 6000, 'lost', 0),
+  ...prevWeeks,
+];
+
+let membership = L.newMembership();
+membership = L.addLeague(membership, work);
+membership = L.addLeague(membership, degen); // active
+
+const league = L.activeLeague(membership);
+const rows = L.standings(league, leagueLocks, WEEK);
+
+/* ---- Render --------------------------------------------------------- */
+
+const bankroll = (rows.find((r) => r.uid === ME) || {}).bankrollCents || 0;
+
+document.getElementById('app').innerHTML = [
+  UI.appBarHTML({ bankrollCents: bankroll, initials: 'GL' }),
+  UI.tabsHTML(['My Locks', 'Live', 'League', 'Pools'], 'League'),
+
+  LG.leagueSwitcherHTML(L.leagueList(membership, ME), membership.activeCode, ME),
+  LG.leagueHeaderHTML(league, WEEK, ME),
+  LG.standingsModeHTML('week'),
+  LG.standingsHTML(rows, ME, 'week'),
+  LG.inviteCardHTML(league, 'https://leydagrant-ux.github.io/DonationKings/'),
+  LG.ownerPanelHTML(league, ME),
+
+  `<div class="section"><h2>All time</h2><p>Bankroll resets every week, so all time ranks on profit.</p></div>`,
+  LG.standingsHTML(L.allTimeStandings(league, leagueLocks), ME, 'all'),
+
+  `<div class="section"><h2>History</h2><p>Who took each week.</p></div>`,
+  LG.historyHTML(L.weekHistory(league, leagueLocks).filter((w) => w.weekKey !== WEEK)),
+
+  `<div class="section"><h2>Start or join another</h2><p>Keep the group chat league and the work one separate.</p></div>`,
+  LG.leagueFormsHTML('join'),
+  `<div style="height:14px"></div>`,
+  LG.leagueFormsHTML('create'),
+
+  `<div class="section"><h2>My Locks</h2><p>This week in ${league.name}.</p></div>`,
+  `<div class="cards">${myLocks.map(UI.lockCardHTML).join('')}</div>`,
+
+  UI.tabBarHTML('League', { Live: 3 }),
+].join('');
+
+console.log('week', WEEK, '| lock states:', myLocks.map((l) => `${l.title}=${l.roll.state}`).join(' '));
+console.log('standings:', rows.map((r) => `${r.rank}. ${r.name} $${(r.bankrollCents / 100).toFixed(2)}${r.bust ? ' BUST' : ''}`).join('  '));
+window.__state = { membership, league, rows, locks: myLocks, leagueLocks };
+</script>
+</body>
+</html>

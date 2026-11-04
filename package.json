@@ -1,0 +1,6 @@
+{
+  "name": "donationkings",
+  "private": true,
+  "type": "module",
+  "description": "Sports parlay tracker with a weekly friend-group competition. No dependencies by design; the app is vanilla ES modules with no build step."
+}

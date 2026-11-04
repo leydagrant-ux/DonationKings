@@ -1,0 +1,4 @@
+# Keep LF everywhere. Mixed line endings make an exact-match patch fail
+# against its own output, which has cost real debugging time on this machine.
+* text=auto eol=lf
+*.png binary

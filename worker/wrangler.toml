@@ -1,0 +1,37 @@
+name = "donationkings-api"
+main = "index.js"
+compatibility_date = "2026-11-01"
+
+# Origins allowed to call this Worker. The GitHub Pages site plus the local
+# dev server. Anything else is refused before a token is even checked.
+# The origin check is NOT the security boundary (Origin is trivially forged
+# outside a browser); the Firebase token is. This just stops other sites'
+# pages from using the API.
+[vars]
+ALLOWED_ORIGINS = "https://leydagrant-ux.github.io,http://localhost:8791"
+
+# Your Firebase project id. Tokens are accepted only if their audience and
+# issuer match this exactly. Reuse the LockIN project or make a new one; a new
+# one keeps the two apps' accounts separate, which is probably what you want
+# since friends will have DonationKings accounts and not LockIN ones.
+FIREBASE_PROJECT_ID = "donationkings"
+
+# D1. Create it once and paste the id it prints:
+#   npx wrangler d1 create donationkings
+[[d1_databases]]
+binding = "DB"
+database_name = "donationkings"
+database_id = "493d5b49-72cb-4b72-b21e-6244cc318b3d"
+
+# No secrets are needed yet. The screenshot-reading step will add one:
+#   npx wrangler secret put GEMINI_API_KEY
+
+# Setup, once:
+#   cd worker
+#   npx wrangler d1 create donationkings          # paste database_id above
+#   npx wrangler d1 execute donationkings --local  --file=./schema.sql
+#   npx wrangler d1 execute donationkings --remote --file=./schema.sql
+#   npx wrangler deploy
+#
+# Local development, which runs the real Worker against a local D1:
+#   npx wrangler dev --local
