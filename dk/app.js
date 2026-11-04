@@ -668,6 +668,15 @@ async function boot() {
   }
 }
 
+/* A new version arrived. Reloading outright would throw away a half-typed
+ * lock, so this offers the reload instead and takes it only when nothing is
+ * in progress. index.html calls this on `controllerchange`. */
+window.__dkUpdateReady = () => {
+  if (!draft && !scan) { location.reload(); return; }
+  banner = 'A new version is ready. Finish this and reload when you are done.';
+  render();
+};
+
 boot();
 window.__dk = {
   get state() { return state; },

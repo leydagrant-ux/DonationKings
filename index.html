@@ -8,7 +8,10 @@
 <title>DonationKings</title>
 <link rel="stylesheet" href="./dk/theme.css">
 <link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icons/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="DonationKings">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 </head>
 <body>
@@ -20,5 +23,40 @@
   DonationKings needs JavaScript to grade locks against live game data.
 </noscript>
 <script type="module" src="./dk/app.js"></script>
+
+<script>
+/* Service worker registration.
+ *
+ * The update check runs on launch AND on every return to foreground. The
+ * sibling bankroll app registered once on load and nothing else, so an
+ * installed app ran stale JavaScript for days and nine release notes had to
+ * tell people to delete it from their home screen and add it again.
+ *
+ * On `controllerchange` the app is asked to handle it, so a reload cannot
+ * interrupt somebody mid-entry; only if nothing is listening does this reload
+ * outright. */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', async () => {
+    let reg;
+    try {
+      reg = await navigator.serviceWorker.register('./sw.js');
+    } catch { return; /* fine offline, and fine on file:// */ }
+
+    const checkForUpdate = () => { try { reg.update(); } catch { /* offline */ } };
+    checkForUpdate();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') checkForUpdate();
+    });
+
+    let handled = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (handled) return;
+      handled = true;
+      if (window.__dkUpdateReady) window.__dkUpdateReady();
+      else window.location.reload();
+    });
+  });
+}
+</script>
 </body>
 </html>
