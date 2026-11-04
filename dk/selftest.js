@@ -24,6 +24,7 @@ import * as L from './league.js';
 import * as ST from './store.js';
 import * as DV from './derive.js';
 import * as SL from './slip.js';
+import { lockTitle as UI_lockTitle } from './ui.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -937,7 +938,12 @@ function testStore(t, snaps) {
   const dWin = DV.deriveLock(winner, full);
   t.eq('a real winner grades as won', dWin.state, G.STATE.WON);
   t.eq('and prices from the stored odds', dWin.returnCents, O.totalReturnCents(1000, O.americanToDecimal(260)));
-  t.eq('the title names the leg count', dWin.title, 'Single Lock');
+  // derive.js carries no presentation: the Worker's scheduled grader imports
+  // it, and dragging the render layer onto the server would be both wasteful
+  // and a way for the two to drift apart.
+  t.eq('no display title is derived', dWin.title, undefined);
+  t.eq('the title is the render layer’s job', UI_lockTitle(1), 'Single Lock');
+  t.eq('and it counts legs', UI_lockTitle(4), '4 Leg Lock');
 
   // The trap again, this time all the way through storage and derivation.
   const loser = ST.newLock({

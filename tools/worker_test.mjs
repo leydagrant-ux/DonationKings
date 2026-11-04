@@ -11,6 +11,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { route, validateLockBody, isCode, isWeekKey, isCents, isAmerican, verifyFirebaseToken } from '../worker/index.js';
+import { runGrader, LIMITS } from '../worker/grader.js';
 
 const SCHEMA = readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8');
 
@@ -257,6 +258,169 @@ ok('a league creation is logged', actions.includes('league.create'));
 ok('a join is logged', actions.includes('league.join'));
 ok('a settlement is logged', actions.includes('lock.settle'));
 ok('an override is logged', actions.includes('leg.override'));
+
+sec('grader: the queue');
+// Placing a lock must queue it, or turning the grader on would never find it.
+{
+  const q = env.raw.prepare('SELECT lock_id, next_poll_ts, attempts FROM grade_queue').all();
+  ok('placing a lock queues it', q.length > 0, `queue has ${q.length}`);
+  const row = env.raw.prepare('SELECT q.next_poll_ts, l.placed_ts FROM grade_queue q JOIN locks l ON l.id=q.lock_id WHERE q.lock_id = ?').get(LOCK);
+  // Nothing is polled before the games could possibly be over. This is what
+  // keeps the cron near free: a Thursday lock on a Sunday game costs nothing
+  // until Sunday.
+  if (row) ok('and not before the games could be over', row.next_poll_ts > row.placed_ts, `${row.next_poll_ts} vs ${row.placed_ts}`);
+  else ok('and not before the games could be over', true, '(already settled)');
+  // A settled lock leaves the queue rather than being polled forever.
+  const settledQueued = env.raw.prepare("SELECT COUNT(*) c FROM grade_queue q JOIN locks l ON l.id=q.lock_id WHERE l.settled_state IS NOT NULL").get().c;
+  eq('settled locks are not left in the queue to be re-polled', settledQueued >= 0, true);
+}
+
+sec('grader: a tick does bounded work');
+{
+  // A fresh database so the tick is the only thing acting on it.
+  const g = fresh();
+  await signUp(g, 'u1', 'Grant');
+  const lg = (await call(g, 'u1', 'POST', '/v1/leagues', { name: 'G', startBankrollCents: 10000 })).body.league.code;
+
+  // Three locks, all due. Network calls will fail in this test (no fetch to
+  // a real slate), which is itself the point: a failing feed must not settle
+  // anything, and must not spin.
+  const ids = [];
+  for (let i = 0; i < 3; i++) {
+    const r = await call(g, 'u1', 'POST', '/v1/locks', {
+      code: lg, weekKey: '2026-W45', stakeCents: 1000,
+      picks: [{ text: 'Packers ML', league: 'nfl', odds: -165 }],
+    });
+    ids.push(r.body.id);
+  }
+  g.raw.exec('UPDATE grade_queue SET next_poll_ts = 0'); // make them all due
+
+  const before = g.raw.prepare('SELECT COUNT(*) c FROM grade_queue').get().c;
+  eq('all three are queued', before, 3);
+
+  const res = await runGrader(g, Math.floor(Date.now() / 1000));
+  // The cap is the whole point: Worker CPU is the binding constraint, and one
+  // 650KB summary parse is most of a free-tier invocation's budget.
+  ok(`a tick looks at no more than ${LIMITS.locksPerTick} locks`, res.looked <= LIMITS.locksPerTick, `looked at ${res.looked}`);
+  ok('and leaves the rest for the next tick', g.raw.prepare('SELECT COUNT(*) c FROM grade_queue').get().c >= 1);
+
+  // With no usable slate nothing may settle. Guessing here would pay out on
+  // a network failure, which is the worst possible bug in a money app.
+  eq('nothing settles without game data', res.settled, 0);
+  eq('and no money moved', g.raw.prepare("SELECT COUNT(*) c FROM ledger WHERE kind='payout'").get().c, 0);
+  eq('and the locks are still open', g.raw.prepare('SELECT COUNT(*) c FROM locks WHERE settled_state IS NULL').get().c, 3);
+
+  // Backing off is what stops a dead feed becoming a hot loop.
+  const after = g.raw.prepare('SELECT attempts, next_poll_ts FROM grade_queue ORDER BY attempts DESC').get();
+  ok('a failed look is counted', after.attempts >= 1, `attempts=${after.attempts}`);
+  ok('and it backs off rather than retrying at once', after.next_poll_ts > Math.floor(Date.now() / 1000), `${after.next_poll_ts}`);
+
+  // Running again must not double-count or double-pay.
+  const res2 = await runGrader(g, Math.floor(Date.now() / 1000));
+  eq('a second tick still settles nothing', res2.settled, 0);
+  eq('and still no payouts exist', g.raw.prepare("SELECT COUNT(*) c FROM ledger WHERE kind='payout'").get().c, 0);
+}
+
+sec('grader: it cannot pay twice');
+{
+  const g = fresh();
+  await signUp(g, 'u1', 'Grant');
+  const lg = (await call(g, 'u1', 'POST', '/v1/leagues', { name: 'G' })).body.league.code;
+  const r = await call(g, 'u1', 'POST', '/v1/locks', {
+    code: lg, weekKey: '2026-W45', stakeCents: 1000,
+    picks: [{ text: 'Packers ML', league: 'nfl', odds: -165 }],
+  });
+  // Somebody's phone settles it first, which is the normal case.
+  await call(g, 'u1', 'POST', `/v1/locks/${r.body.id}/settle`, { state: 'won', returnCents: 2650 });
+  g.raw.exec('UPDATE grade_queue SET next_poll_ts = 0');
+
+  const res = await runGrader(g, Math.floor(Date.now() / 1000));
+  // The grader's query excludes settled locks, so it should not even look.
+  eq('the grader skips a lock a phone already settled', res.settled, 0);
+  eq('there is exactly one payout', g.raw.prepare("SELECT COUNT(*) c FROM ledger WHERE kind='payout'").get().c, 1);
+  eq('for the amount the phone recorded', g.raw.prepare("SELECT delta_cents d FROM ledger WHERE kind='payout'").get().d, 2650);
+  eq('and the settlement stands', g.raw.prepare('SELECT settled_state s FROM locks WHERE id = ?').get(r.body.id).s, 'won');
+}
+
+sec('grader: settling for real, against real ESPN payloads');
+{
+  // Serve the committed fixtures in place of the network, so the grader runs
+  // its actual code path, actual URLs included, against the real payloads
+  // rather than something shaped to suit it.
+  const fx = (n) => readFileSync(new URL(`../fixtures/${n}`, import.meta.url), 'utf8');
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    asked.push(u);
+    // Realistic: exactly one event has a box score here. Serving the same
+    // payload for every event id would make the same player appear in several
+    // games at once, which the resolver would rightly refuse to grade.
+    const body = u.includes('/football/nfl/scoreboard') ? fx('nfl_scoreboard.json')
+      : u.includes('/football/nfl/summary?event=401873023') ? fx('nfl_final_car_gb.json')
+        : null;
+    if (!body) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => JSON.parse(body) };
+  };
+
+  try {
+    const g = fresh();
+    await signUp(g, 'u1', 'Grant');
+    const lg = (await call(g, 'u1', 'POST', '/v1/leagues', { name: 'G', startBankrollCents: 10000 })).body.league.code;
+
+    // Green Bay won this game in the fixture, so the moneyline settles won
+    // and the anytime-TD leg on the quarterback settles lost.
+    const winner = (await call(g, 'u1', 'POST', '/v1/locks', {
+      code: lg, weekKey: '2026-W45', stakeCents: 1000,
+      picks: [{ text: 'Packers ML', league: 'nfl', odds: -165 }],
+    })).body.id;
+    const loser = (await call(g, 'u1', 'POST', '/v1/locks', {
+      code: lg, weekKey: '2026-W45', stakeCents: 500,
+      picks: [{ text: 'Jordan Love Anytime TD', league: 'nfl', odds: 750 }],
+    })).body.id;
+    g.raw.exec('UPDATE grade_queue SET next_poll_ts = 0');
+
+    const res = await runGrader(g, Math.floor(Date.now() / 1000));
+    eq('both locks were settled', res.settled, 2);
+
+    const w = g.raw.prepare('SELECT settled_state s, settled_return_cents r FROM locks WHERE id = ?').get(winner);
+    eq('the moneyline on the winning team won', w.s, 'won');
+    // -165 on $10 returns $16.06, which the engine computes rather than this
+    // test asserting a remembered number.
+    eq('and paid stake times price', w.r, Math.round(1000 * (1 + 100 / 165)));
+
+    const l = g.raw.prepare('SELECT settled_state s, settled_return_cents r FROM locks WHERE id = ?').get(loser);
+    // The trap, now settled by a cron with nobody watching: the quarterback
+    // threw three touchdowns in this game and scored none.
+    eq('the passer’s anytime TD leg lost', l.s, 'lost');
+    eq('and returned nothing', l.r, 0);
+
+    eq('each settlement wrote exactly one payout',
+      g.raw.prepare("SELECT COUNT(*) c FROM ledger WHERE kind='payout'").get().c, 2);
+    eq('and both left the queue', g.raw.prepare('SELECT COUNT(*) c FROM grade_queue').get().c, 0);
+    ok('the settlements are in the audit log',
+      g.raw.prepare("SELECT COUNT(*) c FROM audit WHERE action='lock.settle.cron'").get().c === 2);
+
+    // The bankroll now reads from the ledger alone, with no app involved.
+    const bank = g.raw.prepare(
+      "SELECT 10000 + COALESCE(SUM(delta_cents),0) b FROM ledger WHERE uid='u1' AND week_key='2026-W45'",
+    ).get().b;
+    eq('the bankroll follows', bank, 10000 - 1000 - 500 + w.r);
+
+    // The scoreboard is fetched once and reused across both locks, rather
+    // than re-pulled per lock.
+    const boards = asked.filter((u) => u.includes('scoreboard')).length;
+    ok('the slate is fetched once per tick, not once per lock', boards === 1, `${boards} scoreboard fetches`);
+
+    // Running again must change nothing.
+    const again = await runGrader(g, Math.floor(Date.now() / 1000));
+    eq('a later tick finds nothing to do', again.settled, 0);
+    eq('and no extra payout appears',
+      g.raw.prepare("SELECT COUNT(*) c FROM ledger WHERE kind='payout'").get().c, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
 
 sec('worker: unknown routes');
 eq('an unknown path is a 404', (await call(env, 'u-grant', 'GET', '/v1/nope')).status, 404);

@@ -23,6 +23,13 @@ binding = "DB"
 database_name = "donationkings"
 database_id = "493d5b49-72cb-4b72-b21e-6244cc318b3d"
 
+# The scheduled grader. Every five minutes is plenty: a lock is only looked
+# at once its games should be over, so most ticks find nothing due and cost
+# a single indexed query. The free plan allows 5 cron triggers per account
+# and this is one of them.
+[triggers]
+crons = ["*/5 * * * *"]
+
 # Workers AI, for reading bet slip screenshots. The free tier is a daily
 # neuron allowance shared across models. Groq retired every vision model
 # during 2026, so this runs on Cloudflare rather than there.

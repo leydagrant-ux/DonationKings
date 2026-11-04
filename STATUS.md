@@ -53,7 +53,7 @@ endpoint gotcha that `--file` hits.
 
 ```
 SETUP.md        how to go live, and what is and is not verified
-worker/         the backend: Worker, D1 schema, wrangler config
+worker/         the backend: Worker, grader, D1 schema, wrangler config
 index.html      the shell; its only job is to load dk/app.js
 dk/app.js       state, routing, event wiring. The only stateful module
 dk/backend.js   one async surface, two implementations: local and cloud
@@ -75,7 +75,7 @@ dk/ui-league.js switcher, standings, history, invite, owner controls
 dk/ui-entry.js  adding a lock by hand, with a live parser readback
 dk/slip.js      slip transcript -> draft lock. Pure, and the reason this works
 dk/ingest.js    compress a screenshot, send it up, hand back a draft
-dk/selftest.js  442 checks over all the pure modules
+dk/selftest.js  444 checks over all the pure modules
 preview.html    static design preview, real fixtures through the real engine
 selftest.html   browser test runner; sets document.title to the result
 design/         exported screenshots of the current look
@@ -396,6 +396,44 @@ Things learned from running it on a real DraftKings screenshot:
   box score. None of it may become a bet.
 - Slips often do not print per-leg prices, only the total. That is reported as
   a warning rather than guessed at.
+
+## The scheduled grader
+
+Running every five minutes, settling finished locks so a result does not wait
+for somebody to open the app.
+
+**It imports the same engine the browser uses** (`dk/derive.js` and what that
+pulls in), so a phone and the server cannot reach different verdicts about who
+won. That is the whole reason `derive.js` carries no UI import and why a
+lock's display title is computed by the render layer instead of being derived.
+
+**Worker CPU is the binding constraint, not the database.** One NFL summary is
+roughly 650KB of JSON and parsing it is most of a free-tier invocation's
+budget, with no way to parse JSON partially. So a tick does a strictly bounded
+amount of work: at most 2 locks and 3 box scores, then it stops. A minute
+later it does a bit more.
+
+What keeps it close to free is that **a lock is not looked at until its games
+should be over**: queued at `first_start + 3h`. A Thursday lock on a Sunday
+game costs nothing until Sunday evening, so most ticks find nothing due and
+cost one indexed query.
+
+Three details worth keeping:
+
+- **Nothing settles without game data.** A failed fetch leaves the lock open
+  and backs off. Guessing on a network failure would pay out wrongly, which is
+  the worst bug available in a money app.
+- **Backoff, not retry.** 10 minutes doubling to an hour, so a dead feed is
+  not a hot loop. It gives up after 60 attempts, about two days.
+- **A player-only lock names no team**, so there is nothing to scope the slate
+  by. Successive attempts start further down the list, so a lock whose game
+  sits past the per-tick cap is reached within a few ticks rather than being
+  stuck behind the same first few games forever.
+
+Settlement is idempotent in both directions: whichever of a phone or the cron
+gets there first writes the record, and the other is a harmless no-op. The
+ledger's `UNIQUE` idempotency key is what makes that structural rather than a
+convention.
 
 ## Next task
 

@@ -1,6 +1,9 @@
 // derive.js: stored lock + live data -> everything the UI and standings need.
 //
-// Pure. This is the seam between what is persisted (the legs as written, the
+// Pure, and deliberately free of any UI import: the Cloudflare Worker's
+// scheduled grader imports this file directly, so the server and the browser
+// settle a lock with exactly the same code and cannot disagree about who won.
+// A lock's display title is presentation and belongs to the render layer. This is the seam between what is persisted (the legs as written, the
 // money, the time) and what is computed fresh every render (resolution,
 // verdicts, prices, progress). Nothing graded is ever stored, so a stale
 // verdict cannot be believed later.
@@ -8,8 +11,7 @@
 import { resolveLeg, AUTO_GRADE_MIN } from './resolve.js';
 import { gradeLeg, STATE } from './grade.js';
 import { settleParlay } from './parlay.js';
-import { parlayDecimal, boostedReturnCents, impliedProb, effectiveDecimal } from './odds.js';
-import { lockTitle } from './ui.js';
+import { parlayDecimal, boostedReturnCents, impliedProb } from './odds.js';
 
 const OVERRIDABLE = new Set([STATE.WON, STATE.LOST, STATE.PUSH, STATE.VOID]);
 
@@ -26,7 +28,6 @@ export function deriveLock(stored, ctx) {
   if (stored.settledState) {
     return {
       ...stored,
-      title: lockTitle(stored.picks ? stored.picks.length : 0),
       legs: [],
       roll: { state: stored.settledState, final: true, counts: {}, legCount: 0, liveCount: 0 },
       state: stored.settledState,
@@ -92,7 +93,6 @@ export function deriveLock(stored, ctx) {
 
   return {
     ...stored,
-    title: lockTitle(picks.length),
     legs,
     roll: settled,
     state: settled.state,

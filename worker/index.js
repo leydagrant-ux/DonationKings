@@ -20,6 +20,8 @@
  *   npx wrangler deploy
  */
 
+import { runGrader, enqueueStatement } from './grader.js';
+
 const JWKS_URL = 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0 O 1 I L
 const MAX_LEGS = 16;
@@ -486,6 +488,10 @@ export async function route(method, path, body, env, claims, cors) {
       'INSERT INTO ledger (id, code, uid, week_key, lock_id, kind, delta_cents, idem_key, created_ts) VALUES (?,?,?,?,?,?,?,?,?)',
     ).bind(newId('g'), body.code, uid, body.weekKey, id, 'stake', -body.stakeCents, `stake:${id}`, ts));
     stmts.push(audit(db, body.code, id, uid, 'lock.create', { legs: body.picks.length, stake: body.stakeCents }));
+    // Queue it for the scheduled grader, due once its games should be over.
+    // Nothing is polled before then, which is what keeps the cron close to
+    // free: a Thursday lock on a Sunday game costs nothing until Sunday.
+    stmts.push(enqueueStatement(db, id, firstStart, placed));
 
     await db.batch(stmts);
     return json({ id, eligible: !!eligible }, 200, cors);
@@ -566,6 +572,30 @@ export async function route(method, path, body, env, claims, cors) {
 /* ============================== entry ============================== */
 
 export default {
+  /**
+   * The scheduled grader. Settles finished locks so a result does not wait
+   * for somebody to open the app.
+   *
+   * One line of output per tick on purpose: `wrangler tail` should make the
+   * cost of a tick obvious, because Worker CPU is the limit that matters
+   * here and a quiet runaway loop would be expensive and invisible.
+   */
+  async scheduled(event, env, ctx) {
+    if (!env.DB) return;
+    ctx.waitUntil((async () => {
+      const t0 = Date.now();
+      try {
+        const r = await runGrader(env);
+        if (r.looked || r.errors.length) {
+          console.log(`grader: looked=${r.looked} settled=${r.settled} pending=${r.pending} dropped=${r.dropped} ms=${Date.now() - t0}`
+            + (r.errors.length ? ` errors=${r.errors.join('; ')}` : ''));
+        }
+      } catch (e) {
+        console.error('grader failed', e && e.message);
+      }
+    })());
+  },
+
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
     const allowedOrigins = (env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);

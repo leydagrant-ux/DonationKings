@@ -283,6 +283,9 @@ export function lockCardHTML(lock) {
   const won = st === STATE.WON;
   // Use the resolved selection names rather than the raw transcription, so
   // the summary line reads "AKR Zips, Total Points" and not the leg text.
+  // Presentation, computed here rather than carried on the lock, so derive.js
+  // stays free of the render layer and the Worker's grader can import it.
+  const title = lock.title || lockTitle(lock.legs.length || (lock.picks || []).length);
   const names = lock.legs.map((l) => describeLeg(l.leg, l.snapshot).name).filter(Boolean);
   const pct = lock.impliedPct;
 
@@ -294,7 +297,7 @@ export function lockCardHTML(lock) {
 
     <div class="card-head">
       <h3 class="card-title">
-        ${esc(lock.title)}
+        ${esc(title)}
         ${pct !== undefined ? `<span class="sep">|</span><span class="odds">${pct}%</span>` : ''}
       </h3>
       ${statusPill(st, { live: lock.live })}
