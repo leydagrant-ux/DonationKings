@@ -430,6 +430,15 @@ Three details worth keeping:
   sits past the per-tick cap is reached within a few ticks rather than being
   stuck behind the same first few games forever.
 
+**A working grader looks identical to a broken one.** Most ticks have nothing
+due, which is the design succeeding, and it took a probe of what the Worker
+could actually see to tell that apart from a query returning nothing. The
+answer was that the locks had already been processed and were sitting in a
+ten-minute backoff, exactly as intended. `attempts` and `last_error` on
+`grade_queue` are the first things to look at; `wrangler tail` alone will
+mislead you, because a quiet tick and a broken one print the same nothing.
+That is why an idle tick now logs one short line of its own.
+
 Settlement is idempotent in both directions: whichever of a phone or the cron
 gets there first writes the record, and the other is a harmless no-op. The
 ledger's `UNIQUE` idempotency key is what makes that structural rather than a

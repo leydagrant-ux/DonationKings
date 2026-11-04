@@ -586,12 +586,16 @@ export default {
       const t0 = Date.now();
       try {
         const r = await runGrader(env);
-        if (r.looked || r.errors.length) {
-          console.log(`grader: looked=${r.looked} settled=${r.settled} pending=${r.pending} dropped=${r.dropped} ms=${Date.now() - t0}`
+        // Most ticks have nothing due, which is the design working, so those
+        // stay to one short line. Anything that did work says what it did.
+        if (r.due || r.errors.length) {
+          console.log(`grader: due=${r.due} settled=${r.settled} pending=${r.pending} dropped=${r.dropped} ms=${Date.now() - t0}`
             + (r.errors.length ? ` errors=${r.errors.join('; ')}` : ''));
+        } else {
+          console.log(`grader: idle ms=${Date.now() - t0}`);
         }
       } catch (e) {
-        console.error('grader failed', e && e.message);
+        console.error('grader failed', e && e.message, e && e.stack);
       }
     })());
   },

@@ -136,17 +136,27 @@ function toStored(lock, legs, overrides) {
  */
 export async function runGrader(env, now = Math.floor(Date.now() / 1000)) {
   const db = env.DB;
-  const out = { looked: 0, settled: 0, pending: 0, dropped: 0, errors: [] };
+  const out = { due: 0, looked: 0, settled: 0, pending: 0, dropped: 0, errors: [] };
   const budget = { fetches: LIMITS.summariesPerTick + 4 };
   const cache = { boards: new Map(), snaps: new Map() };
 
+  /* Columns are named rather than using `l.*`, and the LIMIT is a literal
+   * rather than a bound parameter. Both were returning zero rows from the
+   * Worker against a database where the same query, typed out, returned two.
+   * The limit is an internal constant, never user input, so inlining it is
+   * safe. */
   const { results: due } = await db.prepare(
-    `SELECT q.lock_id, q.attempts, l.*
+    `SELECT q.attempts AS attempts,
+            l.id AS id, l.code AS code, l.uid AS uid, l.week_key AS week_key,
+            l.stake_cents AS stake_cents, l.boost_pct AS boost_pct,
+            l.placed_ts AS placed_ts, l.eligible AS eligible
        FROM grade_queue q JOIN locks l ON l.id = q.lock_id
       WHERE q.next_poll_ts <= ? AND l.settled_state IS NULL
       ORDER BY q.next_poll_ts
-      LIMIT ?`,
-  ).bind(now, LIMITS.locksPerTick).all();
+      LIMIT ${LIMITS.locksPerTick}`,
+  ).bind(now).all();
+  out.due = due.length;
+
 
   for (const lock of due) {
     out.looked += 1;
