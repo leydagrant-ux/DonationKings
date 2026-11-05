@@ -237,7 +237,10 @@ const derived = () => D.deriveAll(state.locks, ctx);
 
 function myLocks() {
   const lg = league();
-  return derived().filter((d) => d.uid === state.me.uid && (!lg || d.code === lg.code) && !d.summaryOnly);
+  // Scoped by uid, so `summaryOnly` can only ever have excluded MY OWN
+  // settled locks here. It did exactly that: a parlay vanished the moment
+  // it won. A lock I placed stays mine whether it is running or finished.
+  return derived().filter((d) => d.uid === state.me.uid && (!lg || d.code === lg.code));
 }
 
 function standingsRows(mode) {
@@ -260,7 +263,7 @@ function myBankroll() {
  * for. `myLocks()` is scoped to the active league; this is not.
  */
 function myLocksEverywhere() {
-  return derived().filter((d) => d.uid === state.me.uid && !d.summaryOnly);
+  return derived().filter((d) => d.uid === state.me.uid);
 }
 
 const myRecord = () => ST.recordOf(myLocksEverywhere());
@@ -316,11 +319,6 @@ function leagueViewHTML() {
     LG.leagueSwitcherHTML(L.leagueList(state.membership, state.me.uid), state.membership.activeCode, state.me.uid),
     LG.leagueHeaderHTML(lg, weekKey(), state.me.uid),
     LG.standingsModeHTML(mode),
-    mode === 'week'
-      ? `<p class="mode-note">Everyone starts the week with ${UI.money(lg.startBankrollCents)}.
-         It resets every Monday and does not touch what you really staked.
-         Your actual record is under All time and in Stats.</p>`
-      : '',
     mode === 'history'
       ? LG.historyHTML(L.weekHistory(lg, D.toLedgerRows(derived())).filter((w) => w.weekKey !== weekKey()))
       : LG.standingsHTML(rows, state.me.uid, mode === 'all' ? 'all' : 'week'),

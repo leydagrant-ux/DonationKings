@@ -20,12 +20,23 @@ const OVERRIDABLE = new Set([STATE.WON, STATE.LOST, STATE.PUSH, STATE.VOID]);
  *
  * ctx: { events, snapshots } straight from feed.loadContext.
  *
- * A lock carrying `settledState` is a summary row for somebody else, whose
- * legs this device never fetched. It is passed through as settled rather than
- * graded, because grading it would need a box score per game they bet.
+ * A settled lock keeps its stored result and its stored money: those were
+ * written once, by whoever watched the games finish, and are not recomputed
+ * here. Everything else about it is still derived, so it goes on being a
+ * lock you can look at.
+ *
+ * `summaryOnly` means there is nothing to show but the result, which is the
+ * case only when this device never received the legs. It used to be set for
+ * ANY settled lock, on the assumption that a settled lock belonged to
+ * somebody else. It does not: your own lock comes back from the server with
+ * a result on it the moment it settles, and that assumption made every
+ * parlay you won disappear from your own locks and out of your totals the
+ * instant it won.
  */
 export function deriveLock(stored, ctx) {
-  if (stored.settledState) {
+  const picks = stored.picks || [];
+
+  if (stored.settledState && !picks.length) {
     return {
       ...stored,
       legs: [],
@@ -37,7 +48,6 @@ export function deriveLock(stored, ctx) {
   }
 
   const byId = new Map((ctx.snapshots || []).map((s) => [s.eventId, s]));
-  const picks = stored.picks || [];
 
   const legs = picks.map((pick, i) => {
     const pool = (ctx.snapshots || []).filter((s) => s.league === pick.league);
@@ -98,12 +108,25 @@ export function deriveLock(stored, ctx) {
 
   const eventIds = legs.map((l) => l.leg.eventId).filter(Boolean);
 
+  // A stored result outranks anything worked out here. It was written once,
+  // by whoever saw the games end, and it is what the standings already count.
+  // Re-deriving it on a device that has since dropped those box scores would
+  // walk a won parlay back to pending every time the app was reopened.
+  const isSettled = !!stored.settledState;
+  const roll = isSettled
+    ? { ...settled, state: stored.settledState, final: true }
+    : settled;
+
   return {
     ...stored,
     legs,
-    roll: settled,
-    state: settled.state,
-    returnCents: paid,
+    roll,
+    state: roll.state,
+    returnCents: isSettled ? stored.settledReturnCents : paid,
+    // The result is known but the individual legs may not be: settled locks
+    // stop being polled, so a device that reopens later has no box scores
+    // for them. The display leans on the result rather than on the legs.
+    settledElsewhere: isSettled && !legs.some((l) => l.snapshot),
     // What it pays if every leg lands. The slip's figure is already that
     // number, so it is used as given rather than recomputed.
     toWinCents: hasPromise
@@ -115,10 +138,10 @@ export function deriveLock(stored, ctx) {
       ? stored.payoutCents > (totalReturnCents(stored.stakeCompCents, fullDec) || 0)
       : !!stored.boostPct,
     impliedPct: fullDec ? Math.round(impliedProb(fullDec) * 1000) / 10 : undefined,
-    live: legs.some((l) => l.snapshot && l.snapshot.state === 'in'),
+    live: !isSettled && legs.some((l) => l.snapshot && l.snapshot.state === 'in'),
     correlated: new Set(eventIds).size < eventIds.length,
-    needsReview: legs.some((l) => l.verdict.state === STATE.REVIEW),
-    settledAt: settled.final ? (stored.settledAt || null) : null,
+    needsReview: !isSettled && legs.some((l) => l.verdict.state === STATE.REVIEW),
+    settledAt: roll.final ? (stored.settledAt || null) : null,
   };
 }
 

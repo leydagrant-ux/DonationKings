@@ -812,8 +812,23 @@ function testLeague(t) {
     mk('c', 10000, 'lost', 0), //  cal: 0, busted
   ];
   const rows = L.standings(lg2, locks, W);
-  t.eq('ranked by bankroll', rows.map((r) => r.name), ['Ann', 'Bob', 'Cal']);
+  t.eq('ranked by profit', rows.map((r) => r.name), ['Ann', 'Bob', 'Cal']);
   t.eq('ranks are one-based', rows.map((r) => r.rank), [1, 2, 3]);
+  // Worth stating, because it is why swapping the sort from bankroll to
+  // profit changed no order: within a week everyone starts from the same
+  // figure, so bankroll IS the start plus profit and the two always agree.
+  t.ok(
+    'bankroll is the start plus profit, so the two sorts cannot disagree',
+    rows.every((r) => r.bankrollCents === Math.max(0, r.startCents + r.profitCents)),
+  );
+  // Level on money, the one who risked less to get there is ahead.
+  let lgT = L.createLeague({ name: 'Tie', ownerUid: 'x', ownerName: 'Xan', code: 'TIE234', now: 0 });
+  lgT = L.joinLeague(lgT, { uid: 'y', name: 'Yas' }).league;
+  const tied = [
+    mk('x', 1000, 'won', 3000), // +2000 off 1000 staked
+    mk('y', 8000, 'won', 10000), // +2000 off 8000 staked
+  ];
+  t.eq('a tie on profit goes to whoever risked less', L.standings(lgT, tied, W).map((r) => r.name), ['Xan', 'Yas']);
   t.eq('the leader’s bankroll is computed, not stored', rows[0].bankrollCents, start - 2000 + 8000);
   t.ok('the busted player is flagged', rows[2].bust === true);
   // A tidy zero must not outrank someone still alive with a dollar left.
@@ -1182,6 +1197,78 @@ function testSlip(t) {
   const blank = SL.slipToDraft(SL.parseSlip('nothing here'), 'ABC234');
   t.eq('an empty slip still gives one row to type into', blank.picks.length, 1);
   t.ok('with a sensible default stake', blank.stakeCents > 0);
+}
+
+// ---------------------------------------------------------------------------
+// A settled lock is still your lock
+// ---------------------------------------------------------------------------
+
+/**
+ * Winning must never make a parlay disappear.
+ *
+ * It did. `summaryOnly` was set on any lock carrying a result, on the
+ * assumption that a settled lock belonged to somebody else, and the views
+ * filtered those out. Your own lock comes back from the server with a result
+ * the moment it settles, so the instant one won it left your locks, your
+ * wagered total and your profit, and the app told you that you had never
+ * placed one.
+ */
+function testSettledStillYours(t) {
+  const stored = {
+    id: 'L1', code: 'DEGEN7', uid: 'me', weekKey: '2026-W45',
+    stakeCompCents: 968, payoutCents: null, boostPct: 0,
+    picks: [
+      { text: 'Knicks ML', league: 'nba', odds: -150 },
+      { text: 'Celtics ML', league: 'nba', odds: -200 },
+    ],
+    settledState: 'won', settledReturnCents: 2186, settledAt: 1762300000000,
+  };
+  const empty = { events: [], snapshots: [] };
+  const d = DV.deriveLock(stored, empty);
+
+  t.section('settled: it is still a lock');
+  t.ok('it is not a bare summary row', d.summaryOnly !== true);
+  t.eq('its legs are still there', d.legs.length, 2);
+  t.eq('the stored result stands', d.state, 'won');
+  t.eq('and so does the stored money', d.returnCents, 2186);
+  t.eq('the stake is untouched', d.stakeCompCents, 968);
+  t.ok('and it is marked final', d.roll.final === true);
+
+  t.section('settled: it counts towards your record');
+  // This is the number that read as zero on his screen.
+  const rec = STS.recordOf([d]);
+  t.eq('it counts as a lock', rec.bets, 1);
+  t.eq('it counts as wagered', rec.stakedCents, 968);
+  t.eq('it counts as a win', rec.won, 1);
+  t.eq('and the profit is real', rec.profitCents, 2186 - 968);
+  t.eq('with nothing left at risk', rec.atRiskCents, 0);
+
+  t.section('settled: a device that never saw the games');
+  t.ok('it says so', d.settledElsewhere === true);
+  t.ok('it is not reported as live', d.live === false);
+  t.ok('and not as needing review', d.needsReview === false);
+  // A parlay pays only when its legs land, so a won one says they all did.
+  t.eq('a won parlay shows every leg as hit', UI_pipState(d.legs[0], d), 'won');
+  // A lost one does not say which leg killed it, so they stay unknown.
+  const lost = DV.deriveLock({ ...stored, settledState: 'lost', settledReturnCents: 0 }, empty);
+  t.eq('a lost one does not guess which leg went', UI_pipState(lost.legs[0], lost), 'open');
+  t.eq('and its money is the stored zero', lost.returnCents, 0);
+
+  t.section('settled: a row with no legs is still a summary');
+  const bare = DV.deriveLock({ ...stored, picks: [] }, empty);
+  t.ok('nothing to show but the result', bare.summaryOnly === true);
+  t.eq('which is still right', bare.state, 'won');
+
+  t.section('settled: a result is never re-derived');
+  // The games are in the context and every leg reads as lost, but the stored
+  // result says won. Stored wins: it was written when the games ended, and
+  // the standings already counted it.
+  const contrary = DV.deriveLock(
+    { ...stored, overrides: { 0: G.STATE.LOST, 1: G.STATE.LOST } },
+    empty,
+  );
+  t.eq('a contrary grading does not move it', contrary.state, 'won');
+  t.eq('nor the money', contrary.returnCents, 2186);
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,6 +1676,7 @@ export function runAll(fixtures) {
   testLeague(t);
   testStore(t, snaps);
   testSlip(t);
+  testSettledStillYours(t);
   testFoldedPips(t);
   testPromisedPayout(t);
   testStats(t);

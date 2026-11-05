@@ -282,10 +282,14 @@ export function standings(league, locks, weekKey) {
     const w = memberWeek(m.uid, inWeek, league.startBankrollCents);
     return { ...w, name: m.name, role: m.role, initials: initialsOf(m.name) };
   });
+  // Ranked on profit, not on the weekly bankroll. The bankroll ignores what
+  // was staked to get there: $20 up off $20 risked and $20 up off $400
+  // risked are not the same week, and only one of them is any good.
   rows.sort((a, b) => {
-    if (a.bust !== b.bust) return a.bust ? 1 : -1;
-    if (b.bankrollCents !== a.bankrollCents) return b.bankrollCents - a.bankrollCents;
-    return b.profitCents - a.profitCents;
+    if (b.profitCents !== a.profitCents) return b.profitCents - a.profitCents;
+    // Level on money, the one who risked less to get there is ahead.
+    if (a.stakedCents !== b.stakedCents) return a.stakedCents - b.stakedCents;
+    return b.won - a.won;
   });
   return rows.map((r, i) => ({ ...r, rank: i + 1 }));
 }

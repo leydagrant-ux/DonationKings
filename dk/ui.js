@@ -291,13 +291,18 @@ const fmtPlaced = (ts) => {
  * a parlay as alive when it is already dead, which is the one thing a glance
  * at this row must never get wrong.
  */
-export function pipState(entry) {
+export function pipState(entry, lock) {
   const v = (entry && entry.verdict) || {};
   if (v.state === STATE.WON || v.clinched) return 'won';
   if (v.state === STATE.LOST || v.dead) return 'lost';
   if (v.state === STATE.PUSH || v.state === STATE.VOID) return 'push';
   if (v.state === STATE.REVIEW) return 'review';
   if (entry && entry.snapshot && entry.snapshot.state === 'in') return 'live';
+  // A lock settled before this device saw the games: the result is known
+  // even though the legs were never graded here. A parlay pays only when
+  // its legs land, so a won one says every leg landed. A lost one does not
+  // say WHICH leg killed it, so those stay unknown rather than guessed at.
+  if (lock && lock.settledElsewhere && lock.roll && lock.roll.state === STATE.WON) return 'won';
   return 'open';
 }
 
@@ -315,7 +320,7 @@ function legPipsHTML(lock) {
 
   const n = { won: 0, lost: 0, live: 0, open: 0, push: 0, review: 0 };
   const pips = legs.map((l) => {
-    const k = pipState(l);
+    const k = pipState(l, lock);
     n[k]++;
     return `<span class="pip ${k}"></span>`;
   }).join('');
@@ -326,7 +331,9 @@ function legPipsHTML(lock) {
   if (n.live) bits.push(`${n.live} live`);
   if (n.push) bits.push(`${n.push} void`);
   if (n.review) bits.push(`${n.review} to check`);
-  if (n.open) bits.push(`${n.open} to go`);
+  // "to go" would be a lie on a lock that has already finished. Those legs
+  // are not waiting, they simply were not graded on this device.
+  if (n.open) bits.push(lock.settledElsewhere ? `${n.open} not graded here` : `${n.open} to go`);
   return `<span class="pips">${pips}</span><span class="folded-note">${esc(bits.join(' · '))}</span>`;
 }
 
@@ -388,7 +395,11 @@ export function lockCardHTML(lock, { collapsed = false } = {}) {
          length without opening any of them. -->
     ${collapsed
       ? `<div class="legs-folded">${legPipsHTML(lock)}</div>`
-      : `<div class="legs">${legsHTML(lock.legs, lock.id)}</div>`}
+      : `${lock.settledElsewhere
+          ? `<div class="notice settled-note">This one is already settled, so its games are no longer followed.
+             The result and the money above are what was recorded when they finished.</div>`
+          : ''}
+         <div class="legs">${legsHTML(lock.legs, lock.id)}</div>`}
 
     <div class="card-foot">
       <div class="card-actions">

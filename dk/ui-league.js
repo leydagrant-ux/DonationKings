@@ -34,7 +34,6 @@ export function leagueHeaderHTML(league, weekKey, uid) {
     <p class="league-sub">
       ${esc(weekRange(weekKey))}
       <span class="dot-sep"></span>${league.members.length} ${league.members.length === 1 ? 'player' : 'players'}
-      <span class="dot-sep"></span>everyone starts at ${money(league.startBankrollCents)}
     </p>
   </div>`;
 }
@@ -50,7 +49,7 @@ export function leagueHeaderHTML(league, weekKey, uid) {
  * is the same thing broken down.
  */
 export function standingsModeHTML(mode) {
-  const modes = [['week', 'Weekly game'], ['all', 'All time'], ['history', 'History']];
+  const modes = [['week', 'This week'], ['all', 'All time'], ['history', 'History']];
   return `<div class="chiprow modes">
     ${modes.map(([id, label]) => `<button class="chip" data-mode="${id}" aria-pressed="${id === mode}">${label}</button>`).join('')}
   </div>`;
@@ -59,34 +58,33 @@ export function standingsModeHTML(mode) {
 /**
  * The standings table.
  *
- * `mode` changes what the right-hand number means, because bankroll resets
- * every week: in a week it is the balance, all time it is cumulative profit.
- * Busted players keep their row but are struck through and sorted last.
+ * Ranked on profit, and reading the same way in every mode: the record, what
+ * was put in, and what came back out of it. The weekly $100 bankroll used to
+ * be the headline number here, which made a side competition look like the
+ * fact about somebody's betting. It resets every Monday and takes no account
+ * of what was actually staked, so it says very little.
  */
 export function standingsHTML(rows, meUid, mode = 'week') {
   if (!rows.length) return `<div class="empty">${crownSVG()}<div>Nobody has placed a lock yet.</div></div>`;
 
   return `<div class="lb">${rows.map((r) => {
-    const value = mode === 'all' ? r.profitCents : r.bankrollCents;
-    const up = mode === 'all' ? r.profitCents > 0 : r.bankrollCents > r.startCents;
-    const down = mode === 'all' ? r.profitCents < 0 : r.bankrollCents < r.startCents;
-    const cls = r.bust ? 'bust' : up ? 'up' : down ? 'down' : '';
+    const cls = r.profitCents > 0 ? 'up' : r.profitCents < 0 ? 'down' : '';
     const record = [
       `${r.won}-${r.lost}${r.pushed ? `-${r.pushed}` : ''}`,
       r.open ? `${r.open} live` : '',
       r.roi !== null ? `${r.roi > 0 ? '+' : ''}${Math.round(r.roi * 100)}% ROI` : '',
     ].filter(Boolean).join(' · ');
 
-    return `<div class="lb-row ${r.rank === 1 && !r.bust ? 'lead' : ''} ${r.uid === meUid ? 'me' : ''}">
-      <span class="lb-rank">${r.bust ? '✕' : r.rank}</span>
+    return `<div class="lb-row ${r.rank === 1 ? 'lead' : ''} ${r.uid === meUid ? 'me' : ''}">
+      <span class="lb-rank">${r.rank}</span>
       <span class="avatar sm">${esc(r.initials)}</span>
       <span class="lb-who">
         <span class="lb-name">${esc(r.name)}${r.role === ROLE.OWNER ? '<span class="crown-mini" title="League owner"></span>' : ''}</span>
-        <span class="lb-sub">${esc(record)}${r.bust ? ' · busted' : ''}</span>
+        <span class="lb-sub">${esc(record)}</span>
       </span>
       <span class="lb-right">
-        <span class="lb-amt ${cls}">${mode === 'all' ? signedMoney(value) : money(value)}</span>
-        ${r.atRiskCents ? `<span class="lb-risk">${money(r.atRiskCents)} live</span>` : ''}
+        <span class="lb-amt ${cls}">${signedMoney(r.profitCents)}</span>
+        <span class="lb-risk">${money(r.stakedCents)} wagered${r.atRiskCents ? `, ${money(r.atRiskCents)} live` : ''}</span>
       </span>
     </div>`;
   }).join('')}</div>`;
