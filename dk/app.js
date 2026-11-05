@@ -214,7 +214,7 @@ async function reportSettlements() {
 function schedulePoll() {
   clearTimeout(pollTimer);
   const live = F.anyLive(ctx.snapshots, ctx.events);
-  const open = derived().some((d) => d.state === STATE.PENDING);
+  const open = derived().some(isOpen);
   if (!live || !open) return;
   pollTimer = setTimeout(async () => {
     ctx = DEMO
@@ -236,6 +236,8 @@ document.addEventListener('visibilitychange', () => {
 const league = () => L.activeLeague(state.membership);
 const weekKey = () => L.currentWeekKey();
 const derived = () => D.deriveAll(state.locks, ctx);
+
+const isOpen = D.isOpenLock;
 
 function myLocks() {
   const lg = league();
@@ -355,7 +357,7 @@ function locksViewHTML(onlyLive) {
   }
 
   let list = myLocks();
-  if (onlyLive) list = list.filter((d) => d.state === STATE.PENDING).sort(D.byCloseness);
+  if (onlyLive) list = list.filter(isOpen).sort(D.byCloseness);
 
   const head = onlyLive
     ? `<div class="section"><h2>Live</h2><p>${list.length ? 'Closest to cashing first.' : 'Nothing running right now.'}</p></div>`
@@ -387,8 +389,8 @@ function locksViewHTML(onlyLive) {
 function memberBoardHTML(row) {
   const lg = league();
   const mine = derived().filter((d) => d.uid === row.uid && (!lg || d.code === lg.code));
-  const live = mine.filter((d) => d.state === STATE.PENDING).sort(D.byCloseness);
-  const done = mine.filter((d) => d.state !== STATE.PENDING);
+  const live = mine.filter(isOpen).sort(D.byCloseness);
+  const done = mine.filter((d) => !isOpen(d));
 
   if (!mine.length) {
     return `<p class="lb-empty">${UI.esc(row.name)} has not placed anything this week.</p>`;
@@ -413,7 +415,7 @@ function leagueLiveHTML() {
   const lg = league();
   const names = new Map((lg.members || []).map((m) => [m.uid, m]));
   const live = derived()
-    .filter((d) => d.code === lg.code && d.state === STATE.PENDING)
+    .filter((d) => d.code === lg.code && isOpen(d))
     .sort(D.byCloseness);
 
   const head = `<div class="section"><h2>Live locks</h2><p>${live.length
@@ -450,7 +452,7 @@ function statsViewHTML() {
 function render() {
   if (!root) return;
   const tab = state.ui.tab;
-  const liveCount = myLocks().filter((d) => d.state === STATE.PENDING).length;
+  const liveCount = myLocks().filter(isOpen).length;
   const needAuth = CLOUD && !user;
 
   // Until there is a league, every tab would render the same "Start here"

@@ -1729,6 +1729,81 @@ function testEverySlipGivesTheSameThree(t) {
 }
 
 // ---------------------------------------------------------------------------
+// A lock placed before kickoff is not a broken lock
+// ---------------------------------------------------------------------------
+
+/**
+ * Five player props on a game that has not started yet.
+ *
+ * This is taken from a real lock that emptied the league's boards. A player
+ * cannot be found in a box score that does not exist, and the app treated
+ * that as "no such player" rather than "no such game yet". Each leg went to
+ * review, which made the whole lock `needs_review`, and every live view
+ * filtered on `state === PENDING`, so it vanished from the Live tab, from
+ * the league board and from its owner's row. The poll timer keyed off the
+ * same test, so it stopped too and nothing came back to correct it.
+ */
+function testBeforeKickoff(t, snaps) {
+  const finished = snaps.nfl;
+  const stored = {
+    id: 'L1', code: 'DEGEN7', uid: 'dave', stakeCompCents: 1000, payoutCents: 20080, boostPct: 0,
+    picks: [
+      'Derrick Henry Anytime TD Scorer',
+      'Bhayshul Tuten Anytime TD Scorer',
+      'Brenton Strange 30+ Receiving Yards',
+      'Parker Washington 60+ Receiving Yards',
+      'Trevor Lawrence 180+ Passing Yards',
+    ].map((text) => ({ text, league: 'nfl', odds: null })),
+  };
+
+  // A Thursday: one game finished, the night game still to come.
+  const laterGame = {
+    eventId: '999', league: 'nfl', state: 'pre', startAt: 2,
+    home: { abbr: 'BAL', names: ['BAL', 'Ravens', 'Baltimore'] },
+    away: { abbr: 'JAX', names: ['JAX', 'Jaguars', 'Jacksonville'] },
+  };
+  const playedGame = {
+    eventId: finished.eventId, league: 'nfl', state: 'post', startAt: 1,
+    home: finished.home, away: finished.away,
+  };
+
+  t.section('before kickoff: the legs are waiting, not broken');
+  const d = DV.deriveLock(stored, { events: [playedGame, laterGame], snapshots: [finished] });
+  t.ok('every leg is pending', d.legs.every((l) => l.verdict.state === G.STATE.PENDING));
+  t.eq('and says it is waiting for the game', d.legs[0].verdict.reason, 'waiting for the game to start');
+  t.eq('so the lock is pending', d.state, G.STATE.PENDING);
+  t.ok('and not asking for a human', d.needsReview === false);
+
+  t.section('before kickoff: it stays on the live boards');
+  t.ok('the lock counts as still running', DV.isOpenLock(d) === true);
+  // The money has not moved, so it is money at risk rather than a result.
+  const rec = STS.recordOf([d]);
+  t.eq('it is counted as open', rec.open, 1);
+  t.eq('with its stake at risk', rec.atRiskCents, 1000);
+  t.eq('and no result either way', rec.won + rec.lost, 0);
+
+  t.section('before kickoff: a lock needing review is still running');
+  // This is what stopped the poll timer, so nothing ever recovered.
+  t.ok('review counts as open', DV.isOpenLock({ state: G.STATE.REVIEW }) === true);
+  t.ok('pending counts as open', DV.isOpenLock({ state: G.STATE.PENDING }) === true);
+  t.ok('won does not', DV.isOpenLock({ state: G.STATE.WON }) === false);
+  t.ok('lost does not', DV.isOpenLock({ state: G.STATE.LOST }) === false);
+  t.ok('and nothing at all does not throw', DV.isOpenLock(null) === false);
+
+  t.section('after the last whistle: now it is a real problem');
+  // Every game is over and the player still cannot be placed. That will not
+  // fix itself, so now it is right to ask.
+  const allDone = DV.deriveLock(stored, {
+    events: [{ ...playedGame }],
+    snapshots: [finished],
+  });
+  t.ok('the legs go to review', allDone.legs.every((l) => l.verdict.state === G.STATE.REVIEW));
+  t.eq('and so does the lock', allDone.state, G.STATE.REVIEW);
+  t.ok('which is still open, not settled', DV.isOpenLock(allDone) === true);
+  t.ok('and it still says what went wrong', /no player matched|could not match/i.test(allDone.legs[0].verdict.reason || ''));
+}
+
+// ---------------------------------------------------------------------------
 // A settled lock is still your lock
 // ---------------------------------------------------------------------------
 
@@ -2210,6 +2285,7 @@ export function runAll(fixtures) {
   testPrizePicksLive(t);
   testFantasyScore(t, snaps);
   testEverySlipGivesTheSameThree(t);
+  testBeforeKickoff(t, snaps);
   testSettledStillYours(t);
   testFoldedPips(t);
   testPromisedPayout(t);

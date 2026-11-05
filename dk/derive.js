@@ -62,17 +62,26 @@ export function deriveLock(stored, ctx) {
       pct: 0, overshoot: false, render: 'bar', label: '', voidReason: null, reason,
     });
 
+    // Is every game this leg could possibly belong to already over? Until
+    // that is true, failing to place a player is not a failure at all: his
+    // game simply has not kicked off, and a box score cannot list a player
+    // before there is one.
+    //
+    // The old test was "do we hold ANY box score in this league", which is
+    // a different question with the same answer only by accident. On a
+    // Thursday it is true as soon as one game is running, so a prop on the
+    // night game was declared unmatchable hours before kickoff.
+    const anyToCome = events.some((e) => e.state === 'pre' || e.state === 'in');
+
     let verdict;
     if (snapshot) {
       verdict = gradeLeg(leg, snapshot);
-    } else if (pool.length) {
-      // We had box scores for this league and still could not place the leg,
-      // so this is a resolution failure, not a game that has yet to start.
-      // Those two look identical from here and must not: one resolves itself
-      // at kickoff, the other never will until a person weighs in.
+    } else if (pool.length && !anyToCome) {
+      // Every game is finished and the selection still cannot be placed, so
+      // this will not resolve itself and needs a person.
       verdict = blank(STATE.REVIEW, leg.reason || 'could not match this selection to a game');
     } else {
-      verdict = blank(STATE.PENDING, 'waiting for the game to start');
+      verdict = blank(STATE.PENDING, anyToCome ? 'waiting for the game to start' : 'waiting for game data');
     }
 
     // The engine refuses to grade below its confidence bar, whatever the
@@ -218,4 +227,21 @@ export function byCloseness(a, b) {
     return sum / legs.length;
   };
   return score(b) - score(a);
+}
+
+/**
+ * Is this lock still running?
+ *
+ * Needing review is not a result. The money has not moved, and often the
+ * games have not even started, so a lock waiting on a person is every bit
+ * as live as one waiting on a fourth quarter.
+ *
+ * This lives here rather than in the views because six of them asked the
+ * question separately and all six answered it as `state === PENDING`. That
+ * dropped a lock out of the Live tab, the league board and its owner's row
+ * the moment any single leg could not be placed, and it stopped the poll
+ * timer as well, so nothing ever came back to put it right.
+ */
+export function isOpenLock(d) {
+  return !!d && (d.state === STATE.PENDING || d.state === STATE.REVIEW);
 }
