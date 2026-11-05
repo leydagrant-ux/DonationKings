@@ -28,6 +28,10 @@ export function emptyDraft(code) {
 function readback(pick) {
   const text = String(pick.text || '').trim();
   if (!text) return { kind: 'empty', label: '' };
+  // A stat no box score reports. It parses into something, but reading that
+  // back would be a confident description of a bet nothing can follow, so
+  // it says what will actually happen instead.
+  if (pick.ungradeable) return { kind: 'bad', label: 'no box score reports this, so grade it by hand' };
   const sport = (LEAGUES[pick.league] || {}).sport || 'football';
   const p = parseLegText(text, sport);
   if (!p.market) return { kind: 'bad', label: 'not recognized yet' };
@@ -186,7 +190,7 @@ export function scanConfirmHTML({ transcript, preview, slip, model }) {
     const r = readback(p);
     return `<li>
         <span class="sl-text">${esc(p.text)}</span>
-        <span class="sl-read ${r.kind}">${r.kind === 'ok' ? esc(r.label) : '⚠ not recognized yet'}</span>
+        <span class="sl-read ${r.kind}">${r.kind === 'ok' ? '' : '⚠ '}${esc(r.label)}</span>
         ${p.odds === null ? '' : `<span class="odds">${americanStr(p.odds)}</span>`}
       </li>`;
   }).join('')}</ul>` : ''}

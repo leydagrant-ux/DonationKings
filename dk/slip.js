@@ -82,6 +82,11 @@ const AMBIGUOUS_LABEL_LINE = /^to\s*win\b\s*:?\s*[\d.,$x%]+\s*$/i;
 /* A line that is nothing but the chosen side of a two-way pick. The model is
  * told to write only the selected one, so a line like this is the record of
  * which button was lit. */
+/* Stats a book offers that no box score reports. A fantasy score is a
+ * weighted formula the app computes itself, not a number ESPN publishes, so
+ * a leg on one can be tracked and shown but never graded automatically. */
+const UNGRADEABLE_STAT = /^(?:fantasy\s*(?:score|points?)|fpts|pp\s*score)$/i;
+
 const SIDE_WORD = /^\s*[▲▼↑↓]?\s*(more|less|over|under|higher|lower)\b\s*[▲▼↑↓]?\s*$/i;
 
 /** Lines that are chrome, not content. Dropping them cuts false leg matches. */
@@ -109,7 +114,8 @@ const TRAILING_ODDS = /\s[(\[]?([+-]\d{3,5})[)\]]?\s*$/;
 
 /** How many legs the slip says it has: "4 Pick Combo", "3 Leg Parlay". */
 export function declaredLegCount(text) {
-  const m = /\b(\d{1,2})\s*(?:pick|leg|team|selection)s?\b/i.exec(String(text || ''));
+  // The hyphen matters: PrizePicks writes "6-Pick Power Play".
+  const m = /\b(\d{1,2})\s*[-–]?\s*(?:pick|leg|team|selection)s?\b/i.exec(String(text || ''));
   return m ? parseInt(m[1], 10) : null;
 }
 
@@ -163,15 +169,39 @@ export function parseSlip(raw) {
   // Money first, from the whole text, so a label and its number split across
   // two lines still match.
   const flat = all.join(' \n ');
+
+  // A cash-out offer is not the payout. "Slide for Early Payout: $14.17" is
+  // what the book would pay to buy the ticket back right now, which is
+  // neither what was staked nor what it pays if it lands, and taking it
+  // would settle a $925 winner at fourteen dollars.
+  const noCashOut = flat.replace(/\b(?:slide\s*for\s*)?(?:early|cash)[\s-]*(?:out|payout)\b\s*:?\s*\$?\s*[\d.,]+/gi, ' ');
+
   let stakeCents = null;
-  for (const re of STAKE_LABELS) {
-    const m = re.exec(flat);
-    if (m) { stakeCents = parseMoney(m[1]); break; }
-  }
   let payoutCents = null;
-  for (const re of PAYOUT_LABELS) {
-    const m = re.exec(flat);
-    if (m) { payoutCents = parseMoney(m[1]); break; }
+
+  // Both figures on one line: "$25 to win $925". Read together, because
+  // apart the first is just a number and the second sits behind a label
+  // that is also how a book words a moneyline.
+  // Both dollar signs are required and the whole thing must sit on ONE line.
+  // Allowed to wander, it matched "$20" on one line against the "26.5" of a
+  // "To Win 26.5x" two lines below and read a $530 payout as $26.50.
+  const pair = /\$[^\S\n]*([\d.,]+)[^\S\n]*to[^\S\n]*win[^\S\n]*\$[^\S\n]*([\d.,]+)/i.exec(noCashOut);
+  if (pair) {
+    stakeCents = parseMoney(pair[1]);
+    payoutCents = parseMoney(pair[2]);
+  }
+
+  if (stakeCents === null) {
+    for (const re of STAKE_LABELS) {
+      const m = re.exec(noCashOut);
+      if (m) { stakeCents = parseMoney(m[1]); break; }
+    }
+  }
+  if (payoutCents === null) {
+    for (const re of PAYOUT_LABELS) {
+      const m = re.exec(noCashOut);
+      if (m) { payoutCents = parseMoney(m[1]); break; }
+    }
   }
 
   const boostPct = declaredBoost(text);
@@ -191,6 +221,9 @@ export function parseSlip(raw) {
   // so the payout label itself ends up saved as a selection.
   const isMoneyLine = (l) => MONEY_LABEL_LINE.test(String(l || '').trim())
     || AMBIGUOUS_LABEL_LINE.test(String(l || '').trim())
+    // "$25 to win $925": the whole headline is the two money figures, and
+    // read as a selection it becomes a leg named after the price.
+    || /^\$\s*[\d.,]+\s*to\s*win\s*\$?\s*[\d.,]+\s*$/i.test(String(l || '').trim())
     || STAKE_LABELS.some((re) => re.test(l)) || PAYOUT_LABELS.some((re) => re.test(l));
 
   /** Split a line into its selection text and any trailing price. */
@@ -270,8 +303,19 @@ export function parseSlip(raw) {
     return matchStat(m[2], sp) ? { line: m[1], stat: m[2] } : null;
   };
 
-  /** Chrome, or a matchup line: either way it is not part of a selection. */
-  const skippable = (l) => !l || isGameLabel(l) || (isNoise(l) && !isThreshold(l));
+  /**
+   * The team, position and shirt number printed under a player's name:
+   * "JAC • QB • #16". Context, like the matchup line, not a selection.
+   */
+  const isPositionLine = (l) => /^[A-Z]{2,4}\s*[•·|]\s*\S/.test(String(l || '').trim());
+
+  /** A line that is nothing but a number: a line value, or a progress tally. */
+  const isBareNumber = (l) => /^\d+(?:\.\d+)?$/.test(String(l || '').trim());
+
+  /** Chrome, a matchup, or a position line: none of them are selections. */
+  const skippable = (l) => !l || isGameLabel(l) || isPositionLine(l)
+    || /\b(?:early|cash)[\s-]*(?:out|payout)\b/i.test(String(l || ''))
+    || (isNoise(l) && !isThreshold(l));
 
   /** The next line that actually carries something. */
   const nextContent = (from) => {
@@ -305,6 +349,7 @@ export function parseSlip(raw) {
   // single-sport slip ever needs.
   let current = league;
   let assumedSide = false;
+  let ungradeable = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -322,6 +367,54 @@ export function parseSlip(raw) {
     // anywhere, because the choice lives in a pair of buttons the
     // transcription cannot see, so it is read as the higher side and the
     // slip is flagged for a human to check.
+    // The same pick, printed down the page instead of across it: the name,
+    // then the line on its own, then the stat on its own. Two numbers means
+    // the line moved and the first is struck through on screen, so the LAST
+    // one is the live number. Grading Derrick Henry against a struck-out
+    // 68.5 instead of the 0.5 that replaced it turns a winning leg into a
+    // losing one.
+    if (!parseLegText(body, sport).stat && !/\d/.test(body)) {
+      // Deliberately NOT nextContent: that counts a bare number as chrome
+      // and would step straight over the very lines being looked for. This
+      // steps past blanks and the team/position line only.
+      const stepOver = (from) => {
+        let n = from;
+        while (n < lines.length && (!lines[n] || isPositionLine(lines[n]) || isGameLabel(lines[n]))) n++;
+        return n;
+      };
+
+      let j = stepOver(i + 1);
+      let value = null;
+      let seen = 0;
+      while (j < lines.length && isBareNumber(lines[j]) && seen < 3) {
+        value = lines[j].trim();
+        seen++;
+        j = stepOver(j + 1);
+      }
+      if (value !== null && lines[j]) {
+        const statLine = splitOdds(lines[j]).body;
+        const sp = (LEAGUES[current] || {}).sport || sport;
+        const known = matchStat(statLine, sp);
+        // A stat the box score cannot answer is still a leg that was bet.
+        // Dropping it silently loses a pick and quietly makes a six-leg
+        // parlay look like a five-leg one, so it is kept and marked.
+        if (known || UNGRADEABLE_STAT.test(statLine)) {
+          const k = nextContent(j + 1);
+          const said = SIDE_WORD.exec(lines[k] || '');
+          const side = said ? (/^(?:more|over|higher|↑)/i.test(said[1]) ? 'Over' : 'Under') : 'Over';
+          const text = `${body} ${side} ${value} ${statLine}`;
+          const p = parseLegText(text, sp);
+          if (!known || (p.market && p.subjectRaw && p.stat)) {
+            picks.push({ text, league: current, odds, assumedSide: !said, ungradeable: !known });
+            if (!said) assumedSide = true;
+            if (!known) ungradeable = true;
+            i = said ? k : j;
+            continue;
+          }
+        }
+      }
+    }
+
     if (!parseLegText(body, sport).stat) {
       const j = nextContent(i + 1);
       const ls = lineAndStat(lines[j], current);
@@ -426,6 +519,9 @@ export function parseSlip(raw) {
   // buttons, not in any text, so a transcription cannot see which way each
   // pick went. Reading them all as the higher side is a guess, and a guess
   // about money has to be said out loud rather than buried.
+  if (ungradeable) {
+    warnings.push('One of these is a fantasy score, which no box score reports. It is saved and shown, but it has to be graded by hand when the game ends.');
+  }
   if (assumedSide) {
     warnings.push('This slip does not print More or Less in words, so every pick was read as More. Change any that were Less before saving.');
   }
@@ -560,6 +656,9 @@ export function slipToDraft(slip, code) {
         // warning stopped at the confirmation screen and the form showed a
         // guess looking exactly like a certainty.
         assumedSide: !!p.assumedSide,
+        // Carried too, so the form can say "graded by hand" rather than
+        // showing a confident reading of a stat nothing reports.
+        ungradeable: !!p.ungradeable,
       }))
       : [{ text: '', league: slip.league || 'nfl', odds: '' }],
   };

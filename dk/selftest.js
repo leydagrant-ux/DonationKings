@@ -1357,6 +1357,82 @@ const PRIZEPICKS_CARD = [
   '```',
 ].join('\n');
 
+// The live/share version of the same app: both money figures on one line,
+// each pick printed DOWN the page (name, position, line, stat) rather than
+// across it, a line that has moved shown with the old one struck through,
+// and a cash-out offer at the bottom. Captured from the vision model.
+const PRIZEPICKS_LIVE = [
+  '$25 to win $925', '',
+  '6-Pick Power Play', '',
+  'NFL', '', 'JAC vs BAL', '',
+  'Trevor Lawrence', '', 'JAC • QB • #16', '', '18.5', '', 'Fantasy Score', '',
+  'Derrick Henry', '', 'BAL • RB • #22', '', '68.5', '', '0.5', '', 'Rush Yards', '',
+  'Bhayshul Tuten', '', 'JAC • RB • #33', '', '13.5', '', 'Rec Yards', '',
+  'NBA', '', 'ORL vs PHX', '',
+  'Anthony Black', '', 'ORL • G • #0', '', '24.5', '', 'PRA', '',
+  'Miles Bridges', '', 'PHX • F • #22', '', '26', '', 'PRA', '',
+  'NBA', '', 'MIA vs GSW', '',
+  'Stephen Curry', '', 'GSW • G • #30', '', '35.5', '', 'PRA', '',
+  'Slide for Early Payout: $14.17', '',
+  'PRIZEPICKS', '',
+  'Nov 5, 2026 @ 2:32 PM',
+].join('\n');
+
+function testPrizePicksLive(t) {
+  const s = SL.parseSlip(PRIZEPICKS_LIVE);
+
+  t.section('live card: the money is on one line');
+  t.eq('what was bought', s.stakeCents, 2500);
+  t.eq('and what it pays', s.payoutCents, 92500);
+  t.eq('six picks declared', s.declaredLegs, 6);
+  // The cash-out offer is what the book would pay to buy the ticket back
+  // now. Taken as the payout it settles a $925 winner at fourteen dollars.
+  t.ok('the early payout offer is not the payout', s.payoutCents !== 1417);
+
+  t.section('live card: picks printed down the page');
+  t.eq('all six are read', s.picks.length, 6);
+  t.eq('the picks, in order', s.picks.map((p) => p.text), [
+    'Trevor Lawrence Over 18.5 Fantasy Score',
+    'Derrick Henry Over 0.5 Rush Yards',
+    'Bhayshul Tuten Over 13.5 Rec Yards',
+    'Anthony Black Over 24.5 PRA',
+    'Miles Bridges Over 26 PRA',
+    'Stephen Curry Over 35.5 PRA',
+  ]);
+  t.eq('each in its own sport', s.picks.map((p) => p.league),
+    ['nfl', 'nfl', 'nfl', 'nba', 'nba', 'nba']);
+  // The team and position line sits between the name and the number.
+  t.ok('no pick is named after a position line', s.picks.every((p) => !/[•]/.test(p.text)));
+
+  t.section('live card: a line that moved');
+  // The old number is struck through on screen and both survive the
+  // transcription. Grading Henry against the struck-out 68.5 instead of the
+  // 0.5 that replaced it turns a leg that won into one that lost.
+  const henry = R.parseLegText(s.picks[1].text, 'football');
+  t.eq('the live number is used', henry.line, 0.5);
+  t.ok('not the one it replaced', henry.line !== 68.5);
+  t.eq('and the stat is still right', henry.stat, 'rushYards');
+
+  t.section('live card: a stat no box score reports');
+  // A fantasy score is a formula the book computes, not a figure ESPN
+  // publishes. Dropping the leg would quietly make a six-pick entry look
+  // like a five-pick one, so it is kept, shown, and marked for a person.
+  t.ok('the leg is kept rather than dropped', s.picks[0].text.includes('Fantasy Score'));
+  t.ok('and marked as one to grade by hand', s.picks[0].ungradeable === true);
+  t.ok('with a warning that says so', s.warnings.some((w) => /fantasy score/i.test(w)));
+  t.ok('the gradeable ones are not marked', s.picks.slice(1).every((p) => !p.ungradeable));
+
+  t.section('live card: combined stats');
+  t.eq('PRA is a stat the box score can answer', R.parseLegText(s.picks[3].text, 'basketball').stat, 'pra');
+  t.eq('and a whole-number line survives', R.parseLegText(s.picks[4].text, 'basketball').line, 26);
+
+  t.section('live card: it reaches the form intact');
+  const draft = SL.slipToDraft(s, 'DEGEN7');
+  t.eq('with the stake', draft.stakeCents, 2500);
+  t.eq('and the payout', draft.payoutCents, 92500);
+  t.eq('and all six legs', draft.picks.length, 6);
+}
+
 function testPrizePicks(t) {
   const s = SL.parseSlip(PRIZEPICKS_CARD);
 
@@ -1515,6 +1591,7 @@ function testEverySlipGivesTheSameThree(t) {
     ['DraftKings share card', PROP_SHARE_CARD, 3, 2221, 7200],
     ['DraftKings bet card', PROP_BET_CARD, 3, 2221, 7200],
     ['PrizePicks entry', PRIZEPICKS_CARD, 6, 2000, 53000],
+    ['PrizePicks live card', PRIZEPICKS_LIVE, 6, 2500, 92500],
   ];
 
   for (const [name, text, legs, bought, pays] of cases) {
@@ -2029,6 +2106,7 @@ export function runAll(fixtures) {
   testSlip(t);
   testPropSlip(t);
   testPrizePicks(t);
+  testPrizePicksLive(t);
   testEverySlipGivesTheSameThree(t);
   testSettledStillYours(t);
   testFoldedPips(t);
