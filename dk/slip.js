@@ -325,3 +325,42 @@ export function slipToDraft(slip, code) {
       : [{ text: '', league: slip.league || 'nfl', odds: '' }],
   };
 }
+
+/**
+ * Fill in every price the book will tell us, and leave typed ones alone.
+ *
+ * The price is applied rather than offered. Tapping a button to accept a
+ * number the app already knew was a step with no decision in it: there is
+ * only one current price, and it is the book's.
+ *
+ * What makes that safe is the `oddsAuto` flag. A price this function wrote
+ * is ours to replace when the selection changes; a price a person typed is
+ * theirs and is never overwritten, because their slip is the authority on
+ * what they were actually given. That matters for a boosted or stale price,
+ * where the book's current number is not the number they got.
+ */
+export function autoprice(draft, events) {
+  if (!draft || !Array.isArray(draft.picks)) return draft;
+  let changed = false;
+
+  const picks = draft.picks.map((p) => {
+    const typed = String(p.odds === undefined || p.odds === null ? '' : p.odds).trim();
+    if (typed && !p.oddsAuto) return p; // theirs, hands off
+
+    const q = suggestOdds(p.text, p.league, events);
+    const has = q && !q.unavailable && q.odds !== null && q.odds !== undefined;
+    const want = has ? String(q.odds) : '';
+
+    if (!want) {
+      // The selection changed to something the feed cannot price. A stale
+      // auto price left behind would quietly belong to the previous leg.
+      if (p.oddsAuto && typed) { changed = true; return { ...p, odds: '', oddsAuto: false }; }
+      return p;
+    }
+    if (want === typed) return p;
+    changed = true;
+    return { ...p, odds: want, oddsAuto: true };
+  });
+
+  return changed ? { ...draft, picks } : draft;
+}

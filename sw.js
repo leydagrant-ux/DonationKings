@@ -16,7 +16,7 @@
  * on every return to foreground, which index.html does.
  */
 
-const VERSION = 'v1.0.3';
+const VERSION = 'v1.0.4';
 const CACHE = `donationkings-${VERSION}`;
 
 const SHELL = [
@@ -39,10 +39,12 @@ const SHELL = [
   './dk/odds.js',
   './dk/league.js',
   './dk/slip.js',
+  './dk/stats.js',
   './dk/ingest.js',
   './dk/ui.js',
   './dk/ui-league.js',
   './dk/ui-entry.js',
+  './dk/ui-stats.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',

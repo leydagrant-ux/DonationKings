@@ -24,6 +24,7 @@ import * as L from './league.js';
 import * as ST from './store.js';
 import * as DV from './derive.js';
 import * as SL from './slip.js';
+import * as STS from './stats.js';
 import { lockTitle as UI_lockTitle } from './ui.js';
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1185,133 @@ function testSlip(t) {
 }
 
 // ---------------------------------------------------------------------------
+// stats.js
+// ---------------------------------------------------------------------------
+
+/**
+ * The record screen is read as fact, so its arithmetic is checked as such.
+ *
+ * The two mistakes that matter are dividing by money that has not come back
+ * yet, which invents a loss, and counting one parlay under two sports, which
+ * makes the rows add up to more than was ever wagered.
+ */
+function testStats(t) {
+  const lock = (over) => ({
+    id: over.id || 'L' + Math.random(),
+    uid: 'me',
+    stakeCompCents: 1000,
+    returnCents: null,
+    state: 'pending',
+    picks: [{ text: 'a', league: 'nfl', odds: -110 }],
+    ...over,
+  });
+
+  t.section('stats: the record');
+  const r = STS.recordOf([
+    lock({ state: 'won', stakeCompCents: 1000, returnCents: 2500 }),   // +1500
+    lock({ state: 'lost', stakeCompCents: 1000, returnCents: 0 }),     // -1000
+    lock({ state: 'push', stakeCompCents: 1000, returnCents: 1000 }),  // 0
+    lock({ state: 'pending', stakeCompCents: 2000 }),                  // still running
+  ]);
+  t.eq('every lock is counted', r.bets, 4);
+  t.eq('wagered is every stake, live ones included', r.stakedCents, 5000);
+  t.eq('money still running is reported on its own', r.atRiskCents, 2000);
+  t.eq('settled stake excludes it', r.settledStakeCents, 3000);
+  t.eq('returns are what came back', r.returnedCents, 3500);
+  t.eq('profit is returns minus the stakes that produced them', r.profitCents, 500);
+  // The trap: dividing by all 5000 would read -30% on a winning record.
+  t.ok('ROI divides by settled money only', Math.abs(r.roi - 500 / 3000) < 1e-9);
+  t.eq('wins', r.won, 1);
+  t.eq('losses', r.lost, 1);
+  t.eq('a push is neither', r.push, 1);
+  t.eq('open locks are counted', r.open, 1);
+  t.ok('and a push is left out of the hit rate', Math.abs(r.winRate - 0.5) < 1e-9);
+
+  t.section('stats: nothing settled yet');
+  const open = STS.recordOf([lock({ state: 'pending', stakeCompCents: 500 })]);
+  t.eq('ROI is unknown, not zero', open.roi, null);
+  t.eq('and so is the hit rate', open.winRate, null);
+  t.eq('profit is zero, because nothing has been decided', open.profitCents, 0);
+  t.eq('an empty list does not throw', STS.recordOf([]).bets, 0);
+  t.eq('and neither does nothing at all', STS.recordOf(null).bets, 0);
+
+  t.section('stats: by sport');
+  const nfl = (o) => lock({ picks: [{ text: 'a', league: 'nfl' }], ...o });
+  const nba = (o) => lock({ picks: [{ text: 'a', league: 'nba' }], ...o });
+  const both = (o) => lock({ picks: [{ text: 'a', league: 'nfl' }, { text: 'b', league: 'nba' }], ...o });
+  const set = [
+    nfl({ state: 'won', stakeCompCents: 1000, returnCents: 3000 }),
+    nfl({ state: 'lost', stakeCompCents: 1000, returnCents: 0 }),
+    nba({ state: 'lost', stakeCompCents: 2000, returnCents: 0 }),
+    both({ state: 'won', stakeCompCents: 500, returnCents: 4000 }),
+  ];
+  t.eq('a single-sport parlay is filed under that sport', STS.sportOf(set[0]), 'nfl');
+  t.eq('one spanning two is filed under mixed', STS.sportOf(set[3]), 'mixed');
+  const rows = STS.bySport(set);
+  t.eq('three buckets', rows.length, 3);
+  // The invariant that makes the table trustworthy.
+  t.eq(
+    'the buckets add up to exactly what was wagered',
+    rows.reduce((s, x) => s + x.stakedCents, 0),
+    STS.recordOf(set).stakedCents,
+  );
+  t.eq(
+    'and to exactly the same profit',
+    rows.reduce((s, x) => s + x.profitCents, 0),
+    STS.recordOf(set).profitCents,
+  );
+  const nflRow = rows.find((x) => x.key === 'nfl');
+  t.eq('NFL staked', nflRow.stakedCents, 2000);
+  t.eq('NFL profit', nflRow.profitCents, 1000);
+
+  t.section('stats: by size');
+  const sized = [
+    lock({ state: 'lost', picks: [{ league: 'nfl' }], returnCents: 0 }),
+    lock({ state: 'lost', picks: [{ league: 'nfl' }, { league: 'nfl' }], returnCents: 0 }),
+    lock({ state: 'lost', picks: Array.from({ length: 7 }, () => ({ league: 'nfl' })), returnCents: 0 }),
+    lock({ state: 'lost', picks: Array.from({ length: 6 }, () => ({ league: 'nfl' })), returnCents: 0 }),
+  ];
+  const buckets = STS.byLegCount(sized);
+  t.ok('a single is its own bucket', buckets.some((b) => b.key === '1'));
+  const big = buckets.find((b) => b.key === '6+');
+  t.eq('six and seven legs share one bucket', big.bets, 2);
+
+  t.section('stats: sorting');
+  const sorted = STS.sortRows(rows, 'stakedCents', 'desc');
+  t.ok('biggest first', sorted[0].stakedCents >= sorted[sorted.length - 1].stakedCents);
+  const asc = STS.sortRows(rows, 'stakedCents', 'asc');
+  t.eq('and the other way round', asc[0].stakedCents, sorted[sorted.length - 1].stakedCents);
+  // A row with nothing settled has no ROI, and must not read as the worst.
+  const withBlank = [...rows, { key: 'cbb', bets: 1, stakedCents: 100, profitCents: 0, roi: null }];
+  t.eq('a row with no ROI sorts last going down', STS.sortRows(withBlank, 'roi', 'desc').pop().key, 'cbb');
+  t.eq('and last going up too', STS.sortRows(withBlank, 'roi', 'asc').pop().key, 'cbb');
+  t.eq('sorting nothing does not throw', STS.sortRows(null, 'roi').length, 0);
+
+  t.section('stats: streaks');
+  const seq = ['won', 'won', 'push', 'won', 'lost', 'lost'].map((s, i) => lock({
+    state: s, settledAt: 1000 + i, returnCents: s === 'won' ? 2000 : s === 'push' ? 1000 : 0,
+  }));
+  const st = STS.streaks(seq);
+  // A push sits between two wins and must not break the run.
+  t.eq('a push does not break a run', st.longestWin, 3);
+  t.eq('the longest losing run', st.longestLoss, 2);
+  t.eq('and the current run is negative while losing', st.current, -2);
+  t.eq('no settled locks, no streak', STS.streaks([]).current, 0);
+
+  t.section('stats: highlights');
+  const hl = STS.recordOf(set);
+  t.eq('the biggest hit is the biggest profit', hl.best.profitCents, 3500);
+  t.eq('the worst beat is the biggest loss', hl.worst.profitCents, -2000);
+
+  t.section('stats: the whole report');
+  const rep = STS.report(set);
+  t.ok('it carries the overall record', rep.overall.bets === 4);
+  t.ok('the sport rows', rep.sports.length === 3);
+  t.ok('the size rows', rep.legCounts.length >= 1);
+  t.ok('and the streaks', typeof rep.streaks.current === 'number');
+}
+
+// ---------------------------------------------------------------------------
 // Pricing the entry form off the live board
 // ---------------------------------------------------------------------------
 
@@ -1332,6 +1460,7 @@ export function runAll(fixtures) {
   testLeague(t);
   testStore(t, snaps);
   testSlip(t);
+  testStats(t);
   testPricing(t, fixtures);
   const ms = Date.now() - t0;
   const passed = t.results.filter((r) => r.pass).length;

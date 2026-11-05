@@ -58,32 +58,41 @@ function legRowHTML(pick, i, count, events) {
       </select>
       <input class="entry-text" data-i="${i}" value="${esc(pick.text)}" autocomplete="off"
              placeholder="${i === 0 ? 'Packers ML' : 'Tucker Kraft Anytime TD'}" aria-label="Selection">
-      <input class="entry-odds" data-i="${i}" value="${esc(pick.odds)}" inputmode="numeric"
+      <input class="entry-odds ${pick.oddsAuto ? 'auto' : ''}" data-i="${i}" value="${esc(pick.odds)}" inputmode="numeric"
              placeholder="-110" aria-label="Odds">
       ${count > 1 ? `<button class="entry-del" data-action="del-leg" data-i="${i}" aria-label="Remove leg">✕</button>` : ''}
     </div>
     ${r.kind !== 'empty' ? `<div class="entry-read ${r.kind}">${r.kind === 'ok' ? '' : '⚠ '}${esc(r.label)}</div>` : ''}
-    ${quoteHTML(quote, i)}
+    ${quoteHTML(quote, pick)}
   </div>`;
 }
 
 /**
- * What the book currently says, under the leg.
+ * Where the price in the box came from.
  *
- * Shown rather than silently filled so the price is always traceable to a
- * source and a moment. An offered price can be taken with one tap; a player
- * prop says plainly that the feed does not carry one, instead of leaving an
- * empty box that looks broken.
+ * The price is filled in automatically, so this line is not an offer to
+ * accept it, it is the receipt: which book, which game, which line. That
+ * matters because the number is now in the field without anybody typing it,
+ * and a number you did not type should always say where it came from.
+ *
+ * When somebody types their own price over the top, this keeps showing what
+ * the book currently has, so a slip priced differently is visible rather
+ * than silently disagreeing with the live number.
  */
-function quoteHTML(q, i) {
+function quoteHTML(q, pick) {
   if (!q) return '';
   if (q.unavailable) {
     return `<div class="entry-quote none">${esc(q.reason)} Type it from your slip.</div>`;
   }
   const line = q.line === null ? '' : ` ${q.market === 'game_total' ? '' : (q.line > 0 ? '+' : '')}${q.line}`;
+  const where = `${esc(q.provider || 'book')}${esc(line)}${q.event ? ` · ${esc(q.event)}` : ''}`;
+  const auto = pick && pick.oddsAuto;
+  const typed = String((pick && pick.odds) || '').trim();
+  const differs = !auto && typed && parseAmerican(typed) !== q.odds;
+
   return `<div class="entry-quote">
-    <button data-action="use-odds" data-i="${i}" data-odds="${esc(q.odds)}">Use ${americanStr(q.odds)}</button>
-    <span>${esc(q.provider || 'book')}${esc(line)}${q.event ? ` · ${esc(q.event)}` : ''}</span>
+    ${auto ? `<span class="src">${ICONS.bolt} ${where}</span>` : `<span class="src">${where}</span>`}
+    ${differs ? `<span class="warn">the book has ${esc(americanStr(q.odds))}</span>` : ''}
     ${q.lineMismatch ? `<span class="warn">you typed ${esc(q.typedLine)}, the book has ${esc(q.line)}</span>` : ''}
   </div>`;
 }
@@ -156,23 +165,35 @@ export function entryFormHTML(draft, leagues, events) {
     <div class="field">
       <span>Legs</span>
       <div class="entry-legs">${draft.picks.map((p, i) => legRowHTML(p, i, draft.picks.length, events)).join('')}</div>
-      <button class="ghostbtn" data-action="add-leg">${ICONS.add} Add leg</button>
+      <button class="addleg" data-action="add-leg">${ICONS.add} Add leg</button>
     </div>
 
+    <!-- Bought is the one number only you know. Everything beside it is
+         computed from the legs, which is why it is shown and not typed. -->
     <div class="entry-money">
-      <label class="field"><span>Stake</span>
+      <label class="field"><span>Bought</span>
         <input id="entry-stake" inputmode="decimal" value="${(draft.stakeCents / 100).toFixed(2)}"></label>
-      <label class="field"><span>Boost %</span>
-        <input id="entry-boost" inputmode="numeric" value="${draft.boostPct || 0}"></label>
+      <div class="field"><span>To win</span>
+        <output class="entry-payout ${priced ? '' : 'muted'}">${priced ? money(toWin - draft.stakeCents) : '--'}</output></div>
     </div>
 
     <div class="entry-summary ${priced ? '' : 'muted'}">
       ${priced
         ? `<span>${draft.picks.length} ${draft.picks.length === 1 ? 'leg' : 'legs'} at <b>${americanStr(Math.round((dec >= 2 ? (dec - 1) * 100 : -100 / (dec - 1))))}</b></span>
-           <span>To win <b>${money(toWin)}</b></span>
+           <span>Payout <b>${money(toWin)}</b></span>
            <span class="entry-prob">${Math.round(impliedProb(dec) * 1000) / 10}% implied</span>`
-        : '<span>Fill in every leg and its price to see the payout.</span>'}
+        : '<span>Type each leg. Prices fill in from the book on their own.</span>'}
     </div>
+
+    <!-- A profit boost is a sportsbook token ("25% profit boost"). It lifts
+         winnings only, never the stake back, so it is off unless asked for
+         and tucked away rather than sitting in the main flow. -->
+    <details class="entry-extra" ${draft.boostPct ? 'open' : ''}>
+      <summary>Profit boost${draft.boostPct ? ` · ${esc(draft.boostPct)}%` : ''}</summary>
+      <label class="field"><span>Boost %</span>
+        <input id="entry-boost" inputmode="numeric" value="${draft.boostPct || 0}"></label>
+      <p class="field-note">Only if your book gave you one. It raises the winnings, not the stake.</p>
+    </details>
 
     <button class="bigbtn" data-action="save-lock" ${priced ? '' : 'disabled'}>Add lock</button>
     <button class="linkbtn" data-action="cancel-lock">Cancel</button>

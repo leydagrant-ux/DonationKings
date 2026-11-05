@@ -46,6 +46,10 @@ export const ICONS = {
   locks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5h12v19l-3-2-3 2-3-2-3 2z"/><path d="M9.5 8h5M9.5 12h5"/></svg>',
   board: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V11M10 20V4M16 20v-6M22 20H2"/></svg>',
   add: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  // Marks a number the app filled in by itself, so an unexplained figure
+  // never just appears in a field.
+  bolt: '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none"><path d="M13.5 2 4 13.2h5.6L8.9 22l9.6-11.4h-5.7z"/></svg>',
+  stats: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   info: '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.1" fill="currentColor" stroke="none"/></svg>',
   share: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3 10.5 13.5M21 3l-6.5 18-4-8-8-4z"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>',
@@ -278,7 +282,37 @@ const fmtPlaced = (ts) => {
  *   returnCents, oddsAmerican, boostPct, placedAt, eligible, correlated, live
  * }
  */
-export function lockCardHTML(lock) {
+/**
+ * The folded card's one line: a pip per leg, then a count.
+ *
+ * Folding a lock should put the detail away, not the state. Six parlays on a
+ * Sunday are unreadable fully expanded, and a row of pips still says at a
+ * glance which ones are alive and which are already gone.
+ */
+function legCountLine(lock) {
+  const legs = lock.legs || [];
+  if (!legs.length) return `<span class="folded-note">No leg detail on this one</span>`;
+
+  const n = { won: 0, lost: 0, live: 0, open: 0 };
+  const pips = legs.map((l) => {
+    const v = l.verdict || {};
+    let cls;
+    if (v.state === STATE.WON) { cls = 'won'; n.won++; }
+    else if (v.state === STATE.LOST) { cls = 'lost'; n.lost++; }
+    else if (l.snapshot && l.snapshot.state === 'in') { cls = 'live'; n.live++; }
+    else { cls = 'open'; n.open++; }
+    return `<span class="pip ${cls}"></span>`;
+  }).join('');
+
+  const bits = [];
+  if (n.won) bits.push(`${n.won} hit`);
+  if (n.lost) bits.push(`${n.lost} missed`);
+  if (n.live) bits.push(`${n.live} live`);
+  if (n.open) bits.push(`${n.open} to go`);
+  return `<span class="pips">${pips}</span><span class="folded-note">${esc(bits.join(' · '))}</span>`;
+}
+
+export function lockCardHTML(lock, { collapsed = false } = {}) {
   const st = lock.roll.state;
   const won = st === STATE.WON;
   // Use the resolved selection names rather than the raw transcription, so
@@ -310,7 +344,7 @@ export function lockCardHTML(lock) {
         ? `<span class="sep">|</span><span class="label">Paid:</span><span class="val paid">${money(lock.returnCents)}</span>`
         : ''}
       ${st === STATE.PENDING && lock.toWinCents
-        ? `<span class="sep">|</span><span class="label">To win:</span><span class="val paid">${money(lock.toWinCents)}</span>`
+        ? `<span class="sep">|</span><span class="label">To win:</span><span class="val paid">${money(lock.toWinCents - lock.stakeCompCents)}</span>`
         : ''}
     </div>
 
@@ -320,14 +354,15 @@ export function lockCardHTML(lock) {
       ${lock.capped ? `<span class="badge capped">Stake capped to bankroll</span>` : ''}
     </div>` : ''}
 
-    <button class="infobtn">${ICONS.info} Position Information</button>
-
-    <div class="legs">${legsHTML(lock.legs, lock.id)}</div>
+    ${collapsed
+      ? `<div class="legs-folded">${legCountLine(lock)}</div>`
+      : `<div class="legs">${legsHTML(lock.legs, lock.id)}</div>`}
 
     <div class="card-foot">
       <div class="card-actions">
-        <button class="ghostbtn">${ICONS.share} Share</button>
-        <button class="ghostbtn">Hide Legs ${ICONS.chevron}</button>
+        ${lock.id ? `<button class="ghostbtn fold" data-action="fold-lock" data-id="${esc(lock.id)}" aria-expanded="${!collapsed}">
+          ${collapsed ? 'Show legs' : 'Hide legs'} <span class="chev ${collapsed ? 'down' : ''}">${ICONS.chevron}</span>
+        </button>` : ''}
       </div>
       <div class="card-meta">
         <span class="tag ${lock.eligible === false ? 'ineligible' : ''}">${lock.eligible === false ? 'Not eligible' : 'Counts'}</span>
@@ -342,10 +377,22 @@ export function lockCardHTML(lock) {
 // Chrome
 // ---------------------------------------------------------------------------
 
-export function appBarHTML({ bankrollCents, initials = 'GL' }) {
+/**
+ * The top bar: what you have put in, and what you are up or down.
+ *
+ * It used to show the weekly $100 bankroll, which made a side competition
+ * look like the headline fact about your betting. Wagered and profit are the
+ * two numbers that are true in every week and in every league, so those are
+ * the ones that live up here. The $100 game has its own section in League.
+ */
+export function appBarHTML({ stakedCents = 0, profitCents = 0, initials = 'GL' }) {
+  const sign = profitCents > 0 ? 'up' : profitCents < 0 ? 'down' : '';
   return `<header class="appbar">
     <div class="brand">${crownSVG()}<span class="brand-name">Donation<span class="king">Kings</span></span></div>
-    <div class="bankroll">${money(bankrollCents)}</div>
+    <div class="tallies">
+      <span class="tally"><span class="t-label">Wagered</span><span class="t-val">${money(stakedCents)}</span></span>
+      <span class="tally"><span class="t-label">Profit</span><span class="t-val ${sign}">${profitCents > 0 ? '+' : ''}${money(profitCents)}</span></span>
+    </div>
     <div class="avatar">${esc(initials)}<span class="dot"></span></div>
   </header>`;
 }
@@ -373,7 +420,7 @@ export function chipsHTML(items, active) {
 export function tabBarHTML(active = 'Live', badges = {}) {
   const items = [
     ['My Locks', ICONS.locks], ['Live', ICONS.live],
-    ['League', ICONS.board], ['Add', ICONS.add],
+    ['League', ICONS.board], ['Stats', ICONS.stats], ['Add', ICONS.add],
   ];
   return `<nav class="tabbar">${items.map(([label, svg]) => `
     <button aria-selected="${label === active}">

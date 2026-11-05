@@ -29,6 +29,9 @@ import { localBackend, cloudBackend } from './backend.js';
 import { isConfigured } from './config.js';
 import { STATE } from './grade.js';
 import { parseAmerican } from './odds.js';
+import { autoprice } from './slip.js';
+import * as ST from './stats.js';
+import * as SV from './ui-stats.js';
 
 const root = document.getElementById('app');
 const params = new URLSearchParams(location.search);
@@ -37,6 +40,11 @@ const CLOUD = isConfigured() && !DEMO;
 
 let state = null;
 let ctx = { events: [], snapshots: [], errors: [] };
+
+// Lock ids whose legs are folded away. Kept in memory rather than stored:
+// folding is how you want the screen to look right now, not a setting, and
+// one that survived a reload would hide legs you had forgotten you hid.
+const folded = new Set();
 
 // Today's games with their betting lines, used only to price the entry form.
 // Kept apart from `ctx` because `ctx` is replaced wholesale on every refresh
@@ -155,7 +163,12 @@ async function ensureSlate(leagues) {
     slate = [...byId.values()];
     added = true;
   }));
-  if (added && (draft || scan)) render();
+  if (!added) return;
+  // Prices arriving is the whole point of the fetch, so apply them to
+  // whatever is on the form right now rather than waiting for the next
+  // keystroke to notice the slate turned up.
+  if (draft) draft = autoprice(draft, pricingEvents());
+  if (draft || scan) render();
 }
 
 /** The leagues the open draft needs priced. */
@@ -239,6 +252,19 @@ function myBankroll() {
   return row ? row.bankrollCents : (league() ? league().startBankrollCents : 0);
 }
 
+/**
+ * Every lock of mine, across every league I am in.
+ *
+ * The header tallies and the stats screen are about my betting, not about
+ * one competition, so they deliberately ignore which league a lock counts
+ * for. `myLocks()` is scoped to the active league; this is not.
+ */
+function myLocksEverywhere() {
+  return derived().filter((d) => d.uid === state.me.uid && !d.summaryOnly);
+}
+
+const myRecord = () => ST.recordOf(myLocksEverywhere());
+
 /* ============================== render ============================== */
 
 function authViewHTML() {
@@ -290,6 +316,11 @@ function leagueViewHTML() {
     LG.leagueSwitcherHTML(L.leagueList(state.membership, state.me.uid), state.membership.activeCode, state.me.uid),
     LG.leagueHeaderHTML(lg, weekKey(), state.me.uid),
     LG.standingsModeHTML(mode),
+    mode === 'week'
+      ? `<p class="mode-note">Everyone starts the week with ${UI.money(lg.startBankrollCents)}.
+         It resets every Monday and does not touch what you really staked.
+         Your actual record is under All time and in Stats.</p>`
+      : '',
     mode === 'history'
       ? LG.historyHTML(L.weekHistory(lg, D.toLedgerRows(derived())).filter((w) => w.weekKey !== weekKey()))
       : LG.standingsHTML(rows, state.me.uid, mode === 'all' ? 'all' : 'week'),
@@ -333,7 +364,15 @@ function locksViewHTML(onlyLive) {
 
   return head
     + (ctx.errors.length ? `<div class="notice">${UI.esc(ctx.errors[0])}</div>` : '')
-    + `<div class="cards">${list.map(UI.lockCardHTML).join('')}</div>`;
+    + `<div class="cards">${list.map((d) => UI.lockCardHTML(d, { collapsed: folded.has(d.id) })).join('')}</div>`;
+}
+
+function statsViewHTML() {
+  return SV.statsHTML(ST.report(myLocksEverywhere()), {
+    sort: state.ui.statSort || {},
+    sortRows: ST.sortRows,
+    titleOf: (l) => UI.lockTitle((l.picks || []).length),
+  });
 }
 
 function render() {
@@ -351,13 +390,14 @@ function render() {
   const body = needAuth ? authViewHTML()
     : noLeague ? noLeagueHTML()
       : tab === 'League' ? leagueViewHTML()
-        : tab === 'Live' ? locksViewHTML(true)
-          : locksViewHTML(false);
+        : tab === 'Stats' ? statsViewHTML()
+          : tab === 'Live' ? locksViewHTML(true)
+            : locksViewHTML(false);
 
   const scroll = window.scrollY;
   root.innerHTML = [
-    UI.appBarHTML({ bankrollCents: myBankroll(), initials: state.me.initials }),
-    chrome ? UI.tabsHTML(['My Locks', 'Live', 'League'], tab) : '',
+    UI.appBarHTML({ ...myRecord(), initials: state.me.initials }),
+    chrome ? UI.tabsHTML(['My Locks', 'Live', 'League', 'Stats'], tab) : '',
     banner ? `<div class="notice warn">${UI.esc(banner)}</div>` : '',
     DEMO ? '<div class="notice">Demo data. Nothing here is saved.</div>' : '',
     !CLOUD && !DEMO
@@ -448,6 +488,7 @@ root.addEventListener('click', async (e) => {
     if (label === 'Add') {
       scan = CLOUD && user ? { stage: 'pick', busy: false } : null;
       draft = scan ? null : EN.emptyDraft(league() ? league().code : null);
+      ensureSlate(ENTRY_LEAGUES);
       return setUI({ tab: 'My Locks' });
     }
     // Leaving a half-finished entry by tapping a tab should drop it rather
@@ -535,7 +576,10 @@ root.addEventListener('click', async (e) => {
     // Re-read from whatever the person edited, not from what the model said.
     const edited = document.getElementById('scan-text');
     const { draft: d } = IN.redraft(edited ? edited.value : scan.transcript, league() ? league().code : null);
-    draft = d;
+    // Legs the slip priced keep that price: it is what the book actually
+    // gave them, which a current quote is not. Only legs the screenshot left
+    // unpriced get filled in from the feed.
+    draft = autoprice(d, pricingEvents());
     scan = null;
     ensureSlate(draftLeagues());
     return render();
@@ -555,10 +599,17 @@ root.addEventListener('click', async (e) => {
     draft = { ...draft, picks: [...draft.picks, { text: '', league: draft.picks[draft.picks.length - 1].league, odds: '' }] };
     return render();
   }
-  if (action === 'use-odds') {
-    readDraftInputs();
-    const i = Number(btn.dataset.i);
-    draft = { ...draft, picks: draft.picks.map((p, j) => (j === i ? { ...p, odds: btn.dataset.odds } : p)) };
+  if (action === 'sort-stats') {
+    const { kind, key } = btn.dataset;
+    const cur = (state.ui.statSort || {})[kind] || { key: 'stakedCents', dir: 'desc' };
+    // Tapping the column you are already on turns it around; a new column
+    // starts biggest first, which is what you want every time but one.
+    const dir = cur.key === key ? (cur.dir === 'desc' ? 'asc' : 'desc') : 'desc';
+    return setUI({ statSort: { ...(state.ui.statSort || {}), [kind]: { key, dir } } });
+  }
+  if (action === 'fold-lock') {
+    const id = btn.dataset.id;
+    if (folded.has(id)) folded.delete(id); else folded.add(id);
     return render();
   }
   if (action === 'del-leg') {
@@ -639,6 +690,9 @@ function readDraftInputs() {
       text: text ? text.value : p.text,
       odds: odds ? odds.value : p.odds,
       league: sport ? sport.value : p.league,
+      // The field no longer holding what we put in it means a person typed
+      // over the top, and from then on the price is theirs, not the book's.
+      oddsAuto: !!p.oddsAuto && (!odds || odds.value === p.odds),
     };
   });
   const stake = document.getElementById('entry-stake');
@@ -686,6 +740,7 @@ root.addEventListener('change', async (e) => {
     // Switching a leg to a league nobody has a lock in pulls that slate, so
     // the price for it appears a moment later.
     if (e.target.matches('.entry-sport')) ensureSlate(draftLeagues());
+    draft = autoprice(draft, pricingEvents());
     render();
   }
   return undefined;

@@ -40,8 +40,17 @@ export function leagueHeaderHTML(league, weekKey, uid) {
 }
 
 /** Week / All time / History. */
+/**
+ * Which standings to show.
+ *
+ * "Weekly game" is named as a game on purpose. Everyone starting Monday with
+ * the same $100 is a competition, and it used to be presented as the plain
+ * fact about your money, which it is not: it resets every week and it ignores
+ * what you actually staked. "All time" is the real record, and the Stats tab
+ * is the same thing broken down.
+ */
 export function standingsModeHTML(mode) {
-  const modes = [['week', 'This week'], ['all', 'All time'], ['history', 'History']];
+  const modes = [['week', 'Weekly game'], ['all', 'All time'], ['history', 'History']];
   return `<div class="chiprow modes">
     ${modes.map(([id, label]) => `<button class="chip" data-mode="${id}" aria-pressed="${id === mode}">${label}</button>`).join('')}
   </div>`;
