@@ -27,9 +27,12 @@ export function parseMoney(text) {
 const STAKE_LABELS = [
   /\b(?:bought|wager(?:ed)?|stake|risk(?:ing|ed)?|bet\s*amount|amount\s*bet)\b\s*:?\s*\$?\s*([\d.,]+)/i,
   /\$?\s*([\d.,]+)\s*\b(?:wager|stake|bet)\b/i,
+  // A share card labels the stake "Total". The dollar sign is required, so
+  // this can never swallow a game total: "Total Points Over 44.5" has none.
+  /\btotal\b\s*:?\s*\$\s*([\d.,]+)/i,
 ];
 const PAYOUT_LABELS = [
-  /\b(?:total\s*payout|paid|payout|to\s*win|to\s*return|potential\s*(?:win|payout|return)|returns?)\b\s*:?\s*\$?\s*([\d.,]+)/i,
+  /\b(?:total\s*payout|paid|payout|to\s*pay|to\s*win|to\s*return|potential\s*(?:win|payout|return)|returns?)\b\s*:?\s*\$?\s*([\d.,]+)/i,
 ];
 
 /** Lines that are chrome, not content. Dropping them cuts false leg matches. */
@@ -42,6 +45,8 @@ const NOISE = [
   /^placed\s*:/i,
   /^\s*[\d.,$%+-]+\s*$/, // a bare number on its own line
   /^(?:deposit|rewards|search|home)\s*$/i,
+  /^(?:sell|buy|trade\s*placed)\s*$/i,
+  /^\d+\s*pick\s*combo\b/i, // the title line, which names no selection
 ];
 
 const isNoise = (line) => NOISE.some((re) => re.test(line.trim()));
@@ -153,12 +158,82 @@ export function parseSlip(raw) {
     return !!p.market && !p.subjectRaw;
   };
 
+  /**
+   * An alt line printed on its own: "60+", "2+".
+   *
+   * The books put the threshold on the headline and the player and stat
+   * underneath, so this is half a leg, not a stray number. It has to be
+   * rescued from the bare-number noise rule, which was eating it and taking
+   * the rest of the leg with it.
+   */
+  const isThreshold = (l) => /^\d+(?:\.\d+)?\s*\+$/.test(String(l || '').trim());
+
+  /**
+   * The matchup line a slip prints under each selection, like
+   * "JAX Jaguars @ BAL Ravens".
+   *
+   * It is context, not a selection. Read as one it became the subject of the
+   * leg below it, so a parlay came out as "JAX Jaguars @ BAL Ravens Anytime
+   * TD Scorer" with the player's name thrown away.
+   */
+  const isGameLabel = (l) => {
+    const s = String(l || '').trim();
+    if (!s || isThreshold(s)) return false;
+    if (!/\s(?:@|vs\.?|v\.?|at)\s/i.test(s)) return false;
+    return !parseLegText(s, sport).market;
+  };
+
+  /** Chrome, or a matchup line: either way it is not part of a selection. */
+  const skippable = (l) => !l || isGameLabel(l) || (isNoise(l) && !isThreshold(l));
+
+  /** The next line that actually carries something. */
+  const nextContent = (from) => {
+    let j = from;
+    while (j < lines.length && skippable(lines[j])) j++;
+    return j;
+  };
+
+  /**
+   * Put a lone threshold back where it belongs, between the player and the
+   * stat: "60+" over "Bhayshul Tuten Rushing Yards" is one leg reading
+   * "Bhayshul Tuten 60+ Rushing Yards".
+   *
+   * The split is found by trying every position and keeping the longest
+   * player name that still leaves a stat the grader recognizes. Longest
+   * first matters: splitting after "Bhayshul" also parses, and would file
+   * the bet under a player who does not exist.
+   */
+  const composeThreshold = (thresh, marketLine) => {
+    const words = String(marketLine || '').trim().split(/\s+/);
+    for (let k = words.length - 1; k >= 1; k--) {
+      const cand = `${words.slice(0, k).join(' ')} ${thresh} ${words.slice(k).join(' ')}`;
+      const p = parseLegText(cand, sport);
+      if (p.market && p.subjectRaw && p.stat) return cand;
+    }
+    return null;
+  };
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!line || isNoise(line) || isMoneyLine(line)) continue;
+    if (skippable(line) || isMoneyLine(line)) continue;
 
     let { body, odds } = splitOdds(line);
     let consumed = 1;
+
+    // A threshold headline takes its player and stat from the line below,
+    // which may be a matchup line away.
+    if (isThreshold(body)) {
+      const j = nextContent(i + 1);
+      const target = lines[j];
+      const n = target ? splitOdds(target) : null;
+      const composed = n ? composeThreshold(body, n.body) : null;
+      if (composed) {
+        picks.push({ text: composed, league, odds: odds !== null ? odds : n.odds });
+        i = j;
+        continue;
+      }
+      continue; // a stray number after all
+    }
 
     /* Whether this line is already a whole bet on its own.
      *
@@ -173,14 +248,17 @@ export function parseSlip(raw) {
     const ownComplete = !!own.market && !bareName && (!!own.subjectRaw || own.market === 'game_total');
 
     // Selection on this line, market on the next: join them and take both.
-    const next = lines[i + 1] || '';
-    if (!ownComplete && !isNoise(next) && !isMoneyLine(next) && isMarketLabel(next)) {
+    // The two can be separated by the matchup line, which is why this looks
+    // for the next line with content rather than simply the next line.
+    const j = nextContent(i + 1);
+    const next = lines[j] || '';
+    if (!ownComplete && next && !isMoneyLine(next) && isMarketLabel(next)) {
       const n = splitOdds(next);
       const joined = parseLegText(`${body} ${n.body}`, sport);
       if (joined.market) {
         body = `${body} ${n.body}`;
         if (odds === null) odds = n.odds;
-        consumed = 2;
+        consumed = (j - i) + 1;
       }
     }
 
@@ -211,7 +289,14 @@ export function parseSlip(raw) {
     warnings.push(`The slip says ${declaredLegs} picks but ${picks.length} were read. Check for a missing leg.`);
   }
   if (stakeCents === null) warnings.push('Could not find the stake.');
-  if (picks.some((p) => p.odds === null)) warnings.push('Some leg prices are missing.');
+  // Missing leg prices are not a problem in themselves. A player-prop slip
+  // prints none at all, and it does not need to: what was bought and what it
+  // pays settle the lock between them. It is only a problem when the payout
+  // is missing too, because then there is nothing to settle it with.
+  if (payoutCents === null && picks.some((p) => p.odds === null)) {
+    warnings.push('No payout and no leg prices, so this cannot be settled. Add what it pays if it hits.');
+  }
+  if (payoutCents === null && picks.length) warnings.push('Could not find the payout.');
 
   return {
     stakeCents,
@@ -316,9 +401,15 @@ export function suggestOdds(text, league, events) {
  * path and the typed path converge on the same editable draft.
  */
 export function slipToDraft(slip, code) {
+  const payout = slip.payoutCents === null || slip.payoutCents === undefined ? null : slip.payoutCents;
   return {
     code,
     stakeCents: slip.stakeCents || 1000,
+    // Straight off the slip, so it is not recomputed from the leg prices.
+    // On a player-prop slip there are no leg prices to recompute it from,
+    // and this is the figure that settles the lock.
+    payoutCents: payout,
+    payoutAuto: payout === null,
     boostPct: slip.boostPct || 0,
     picks: slip.picks.length
       ? slip.picks.map((p) => ({ text: p.text, league: p.league, odds: p.odds === null ? '' : String(p.odds) }))

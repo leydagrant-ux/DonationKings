@@ -16,7 +16,7 @@
  * on every return to foreground, which index.html does.
  */
 
-const VERSION = 'v1.0.7';
+const VERSION = 'v1.0.8';
 const CACHE = `donationkings-${VERSION}`;
 
 const SHELL = [

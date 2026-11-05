@@ -6,8 +6,8 @@
 // will eventually produce, and three selects per leg would make entering a
 // six-leg lock a chore nobody does twice.
 
-import { esc, money, americanStr, ICONS } from './ui.js';
-import { parseLegText, matchStat } from './resolve.js';
+import { esc, money, americanStr, ICONS, STAT_LABEL } from './ui.js';
+import { parseLegText } from './resolve.js';
 import { suggestOdds } from './slip.js';
 import { parlayDecimal, boostedReturnCents, impliedProb, parseAmerican } from './odds.js';
 import { LEAGUES } from './espn.js';
@@ -32,13 +32,15 @@ function readback(pick) {
   const p = parseLegText(text, sport);
   if (!p.market) return { kind: 'bad', label: 'not recognized yet' };
 
-  const stat = p.stat ? (matchStat(text, sport) ? p.stat : p.stat) : null;
+  // The readback is there to be read, so it uses the stat's own words.
+  // Printing the internal key had it saying "over 59.5 rushYards".
+  const stat = p.stat ? (STAT_LABEL[p.stat] || p.stat) : null;
   const bits = [];
   if (p.market === 'moneyline') bits.push('moneyline');
   else if (p.market === 'spread') bits.push(`spread ${p.line > 0 ? '+' : ''}${p.line}`);
   else if (p.market === 'game_total') bits.push(`game total ${p.side} ${p.line}`);
   else if (p.market === 'team_total') bits.push(`team total ${p.side} ${p.line}`);
-  else if (p.market === 'player_yes_no') bits.push(stat === 'anytimeTd' ? 'anytime touchdown' : String(stat));
+  else if (p.market === 'player_yes_no') bits.push(p.stat === 'anytimeTd' ? 'anytime touchdown' : String(stat));
   else if (p.market === 'first_td') bits.push('first touchdown');
   else if (p.market === 'player_ou') bits.push(`${p.side} ${p.line} ${stat}`);
   // A game total usually has no subject, but it does when the text named the
@@ -147,17 +149,43 @@ export function scanConfirmHTML({ transcript, preview, slip, model }) {
   </div>`;
 }
 
+/**
+ * What is still missing, named outright.
+ *
+ * A disabled button with no reason beside it is the worst version of this
+ * screen: you can see it will not go, and not why.
+ */
+function missingBit(draft, written, hasPayout) {
+  if (!draft.picks.length || !written.length) return 'Type each leg, what you bought it for, and what it pays.';
+  if (written.length < draft.picks.length) return 'One of the legs is still empty.';
+  if (!(draft.stakeCents > 0)) return 'Fill in what you bought it for.';
+  if (!hasPayout) return 'Fill in what it pays if it hits. Copy it off your slip.';
+  return 'Nearly there.';
+}
+
 export function entryFormHTML(draft, leagues, events) {
+  const written = draft.picks.filter((p) => String(p.text || '').trim());
   const odds = draft.picks.map((p) => parseAmerican(p.odds)).filter((o) => o !== null);
-  const complete = draft.picks.filter((p) => String(p.text || '').trim() && parseAmerican(p.odds) !== null);
-  const priced = complete.length === draft.picks.length && draft.picks.length > 0;
-  const dec = priced ? parlayDecimal(odds) : null;
-  // The payout on the form is the one that settles, so the profit beside it
-  // is worked back from that figure and not from the leg prices. Otherwise
-  // correcting the payout from a slip would leave the profit disagreeing
-  // with it on the same screen.
+  const allPriced = odds.length === draft.picks.length && draft.picks.length > 0;
+  const dec = allPriced ? parlayDecimal(odds) : null;
+
+  // A lock needs its legs and its two money figures, and nothing else. The
+  // per-leg prices are optional because the book has already done the
+  // arithmetic: it printed what was bought and what it pays, and those two
+  // numbers settle the lock on their own. Demanding a price per leg made a
+  // three-leg player-prop slip, where the book shows no leg prices at all,
+  // impossible to enter.
+  const payout = draft.payoutCents;
+  const hasPayout = payout !== null && payout !== undefined && payout > 0;
+  const ready = written.length === draft.picks.length && draft.picks.length > 0
+    && draft.stakeCents > 0 && hasPayout;
+
   const computed = dec ? boostedReturnCents(draft.stakeCents, dec, draft.boostPct) : null;
-  const toWin = draft.payoutCents === null || draft.payoutCents === undefined ? computed : draft.payoutCents;
+  const toWin = hasPayout ? payout : computed;
+  // Worked back from the money when the legs carry no prices, which is the
+  // same sum the book is doing: stake over payout is what it has to beat.
+  const impliedFromMoney = hasPayout && draft.stakeCents > 0 ? draft.stakeCents / payout : null;
+  const implied = dec ? impliedProb(dec) : impliedFromMoney;
 
   return `<div class="entry">
     ${leagues.length > 1 ? `
@@ -190,19 +218,20 @@ export function entryFormHTML(draft, leagues, events) {
     </div>
     <p class="field-note">
       ${draft.payoutAuto
-        ? 'Worked out from the legs. If your slip says something else, type that: a boost or a same-game price will not match the arithmetic, and your slip is the one that pays.'
-        : 'Taken from your slip, so this is what settles.'}
+        ? 'Worked out from the legs. If your slip says something else, type that: your slip is the one that pays.'
+        : 'Straight off your slip, so this is what settles.'}
     </p>
 
-    <div class="entry-summary ${priced ? '' : 'muted'}">
-      ${priced
-        ? `<span>${draft.picks.length} ${draft.picks.length === 1 ? 'leg' : 'legs'} at <b>${americanStr(Math.round((dec >= 2 ? (dec - 1) * 100 : -100 / (dec - 1))))}</b></span>
+    <div class="entry-summary ${ready ? '' : 'muted'}">
+      ${ready
+        ? `<span>${draft.picks.length} ${draft.picks.length === 1 ? 'leg' : 'legs'}${dec
+            ? ` at <b>${americanStr(Math.round((dec >= 2 ? (dec - 1) * 100 : -100 / (dec - 1))))}</b>` : ''}</span>
            <span>Profit <b>${money(toWin - draft.stakeCents)}</b></span>
-           <span class="entry-prob">${Math.round(impliedProb(dec) * 1000) / 10}% implied</span>`
-        : '<span>Type each leg. Prices fill in from the book on their own.</span>'}
+           ${implied !== null ? `<span class="entry-prob">${Math.round(implied * 1000) / 10}% implied</span>` : ''}`
+        : `<span>${esc(missingBit(draft, written, hasPayout))}</span>`}
     </div>
 
-    <button class="bigbtn" data-action="save-lock" ${priced ? '' : 'disabled'}>Add lock</button>
+    <button class="bigbtn" data-action="save-lock" ${ready ? '' : 'disabled'}>Add lock</button>
     <button class="linkbtn" data-action="cancel-lock">Cancel</button>
   </div>`;
 }

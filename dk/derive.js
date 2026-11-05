@@ -100,11 +100,40 @@ export function deriveLock(stored, ctx) {
   // rounding all move it. `boostPct` is the older way of saying the same
   // thing and still settles locks saved before the payout was recorded.
   const hasPromise = stored.payoutCents !== null && stored.payoutCents !== undefined;
-  const paid = settled.returnCents === null || settled.returnCents === 0
-    ? settled.returnCents
-    : hasPromise
-      ? promisedReturnCents(stored.stakeCompCents, fullDec, settled.dec, stored.payoutCents)
-      : boostedReturnCents(stored.stakeCompCents, settled.dec, stored.boostPct);
+  const stake = stored.stakeCompCents;
+
+  // A leg dropped out, so the parlay is no longer the one that was priced.
+  const repriced = settled.counts.push > 0 || settled.counts.void > 0;
+
+  // What it pays is decided by the RESULT, not by whether the leg prices
+  // happened to be recorded. A player-prop slip carries no leg prices at
+  // all: the book prints what was bought and what it pays, and those two
+  // numbers are the whole of the arithmetic. Keying off whether a decimal
+  // could be computed paid out null on a winning parlay.
+  let paid;
+  if (settled.state === STATE.LOST) {
+    paid = 0;
+  } else if (settled.state === STATE.VOID) {
+    paid = stake; // every leg fell out; the stake comes back
+  } else if (settled.state === STATE.WON) {
+    if (hasPromise) {
+      // With leg prices the promise is scaled around whatever dropped out.
+      // Without them there is nothing to scale by, so the promise stands,
+      // which is exactly right whenever nothing dropped out.
+      paid = fullDec
+        ? promisedReturnCents(stake, fullDec, settled.dec, stored.payoutCents)
+        : stored.payoutCents;
+    } else {
+      paid = boostedReturnCents(stake, settled.dec, stored.boostPct);
+    }
+  } else {
+    paid = null; // still running
+  }
+
+  // The one case the two money figures cannot answer on their own: a leg
+  // fell out, so the book would have repriced, and without leg prices there
+  // is no way to work out to what. Say so rather than quietly overpaying.
+  const needsRepriceByHand = repriced && !fullDec && hasPromise && settled.state === STATE.WON;
 
   const eventIds = legs.map((l) => l.leg.eventId).filter(Boolean);
 
@@ -137,10 +166,17 @@ export function deriveLock(stored, ctx) {
     boosted: hasPromise
       ? stored.payoutCents > (totalReturnCents(stored.stakeCompCents, fullDec) || 0)
       : !!stored.boostPct,
-    impliedPct: fullDec ? Math.round(impliedProb(fullDec) * 1000) / 10 : undefined,
+    // From the leg prices when there are any, otherwise from the two money
+    // figures, which is the same sum: what you put in over what it pays.
+    impliedPct: fullDec
+      ? Math.round(impliedProb(fullDec) * 1000) / 10
+      : (hasPromise && stake > 0 ? Math.round((stake / stored.payoutCents) * 1000) / 10 : undefined),
+    // True when the money, not the prices, is what settles this one.
+    pricedByBook: !fullDec && hasPromise,
+    repricedByHand: needsRepriceByHand,
     live: !isSettled && legs.some((l) => l.snapshot && l.snapshot.state === 'in'),
     correlated: new Set(eventIds).size < eventIds.length,
-    needsReview: !isSettled && legs.some((l) => l.verdict.state === STATE.REVIEW),
+    needsReview: !isSettled && (needsRepriceByHand || legs.some((l) => l.verdict.state === STATE.REVIEW)),
     settledAt: roll.final ? (stored.settledAt || null) : null,
   };
 }

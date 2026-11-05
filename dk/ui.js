@@ -61,7 +61,7 @@ export const ICONS = {
 // Turning a resolved leg back into the words a slip would print
 // ---------------------------------------------------------------------------
 
-const STAT_LABEL = {
+export const STAT_LABEL = {
   passYards: 'Passing Yards', passTd: 'Passing TDs', completions: 'Completions',
   passAttempts: 'Pass Attempts', interceptionsThrown: 'Interceptions',
   rushYards: 'Rushing Yards', rushTd: 'Rushing TDs', rushAttempts: 'Carries',

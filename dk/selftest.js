@@ -1200,6 +1200,117 @@ function testSlip(t) {
 }
 
 // ---------------------------------------------------------------------------
+// A player-prop slip, which carries no leg prices at all
+// ---------------------------------------------------------------------------
+
+// The same three-leg parlay as the book prints it two different ways: the
+// share card, which puts the matchup under every selection, and the bet card,
+// which does not. Neither shows a price per leg, because there is not one to
+// show: the book prices the combination and prints what it cost and what it
+// pays. Transcribed from real screenshots.
+const PROP_SHARE_CARD = [
+  'Trade Placed', '29%',
+  '3 Pick Combo',
+  'Bhayshul Tuten', 'JAX Jaguars @ BAL Ravens', 'Anytime TD Scorer',
+  '60+', 'JAX Jaguars @ BAL Ravens', 'Bhayshul Tuten Rushing Yards',
+  '40+', 'JAX Jaguars @ BAL Ravens', 'Derrick Henry Rushing Yards',
+  'Total', '$22.21',
+  'Payout', '$72.00',
+].join('\n');
+
+const PROP_BET_CARD = [
+  '3 Pick Combo | 29%', 'Open',
+  'Bhayshul Tuten, 60+, 40+',
+  'Bought: $22.21 | To Pay: $72.00',
+  'Sell',
+  'Bhayshul Tuten', 'Anytime TD Scorer',
+  '60+', 'Bhayshul Tuten Rushing Yards',
+  '40+', 'Derrick Henry Rushing Yards',
+  'JAX Thu 7:15 PM BAL',
+  'Share', 'Hide Legs',
+  'Trade', 'Placed: Nov 4, 2026 at 10:00:00 PM',
+].join('\n');
+
+function testPropSlip(t) {
+  for (const [name, text] of [['share card', PROP_SHARE_CARD], ['bet card', PROP_BET_CARD]]) {
+    const s = SL.parseSlip(text);
+
+    t.section(`prop slip: the money (${name})`);
+    // The two figures that matter most: they settle the lock between them.
+    t.eq('what it cost', s.stakeCents, 2221);
+    t.eq('and what it pays', s.payoutCents, 7200);
+
+    t.section(`prop slip: the legs (${name})`);
+    t.eq('all three are read', s.picks.length, 3);
+    t.eq('and the slip agrees', s.declaredLegs, 3);
+    t.eq('the legs, in order', s.picks.map((p) => p.text), [
+      'Bhayshul Tuten Anytime TD Scorer',
+      'Bhayshul Tuten 60+ Rushing Yards',
+      'Derrick Henry 40+ Rushing Yards',
+    ]);
+    // A threshold prints on its own line above the player, so putting it back
+    // in the wrong place files the bet under a player who does not exist.
+    const second = R.parseLegText(s.picks[1].text, 'football');
+    t.eq('the 60+ leg keeps its whole player name', second.subjectRaw, 'Bhayshul Tuten');
+    t.eq('and asks for the right stat', second.stat, 'rushYards');
+    t.eq('with the alt line read as over 59.5', second.line, 59.5);
+    const first = R.parseLegText(s.picks[0].text, 'football');
+    t.eq('the anytime TD leg is a yes/no', first.market, 'player_yes_no');
+    t.eq('on the right player', first.subjectRaw, 'Bhayshul Tuten');
+
+    t.section(`prop slip: no leg prices is fine (${name})`);
+    t.ok('none of the legs carry one', s.picks.every((p) => p.odds === null));
+    t.ok('and that is not complained about', !s.warnings.some((w) => /leg prices/i.test(w)));
+    t.ok('nor is anything else', s.warnings.length === 0);
+  }
+
+  t.section('prop slip: the matchup line is context, not a selection');
+  // Read as a selection it became the subject of the leg below it, and the
+  // player's name was thrown away.
+  t.ok(
+    'no leg is named after the fixture',
+    SL.parseSlip(PROP_SHARE_CARD).picks.every((p) => !/Jaguars|Ravens/i.test(p.text)),
+  );
+
+  t.section('prop slip: it reaches the form intact');
+  const draft = SL.slipToDraft(SL.parseSlip(PROP_BET_CARD), 'DEGEN7');
+  t.eq('the stake carries over', draft.stakeCents, 2221);
+  t.eq('the payout carries over', draft.payoutCents, 7200);
+  t.ok('and is marked as coming off the slip', draft.payoutAuto === false);
+  t.eq('with all three legs', draft.picks.length, 3);
+  t.ok('and no prices invented for them', draft.picks.every((p) => p.odds === ''));
+
+  t.section('prop slip: it settles on the money alone');
+  const stored = {
+    id: 'L9', code: 'DEGEN7', uid: 'me', stakeCompCents: 2221, payoutCents: 7200, boostPct: 0,
+    picks: draft.picks.map((p) => ({ text: p.text, league: 'nfl', odds: null })),
+  };
+  const ctx = { events: [], snapshots: [] };
+  const open = DV.deriveLock(stored, ctx);
+  t.eq('before kickoff it is pending', open.state, 'pending');
+  t.eq('and it already knows what it pays', open.toWinCents, 7200);
+  // Worked back from the money, since there are no prices to work from.
+  t.eq('with the implied chance from the two figures', open.impliedPct, Math.round((2221 / 7200) * 1000) / 10);
+  t.ok('and it says the book priced it', open.pricedByBook === true);
+
+  const won = DV.deriveLock({ ...stored, overrides: { 0: G.STATE.WON, 1: G.STATE.WON, 2: G.STATE.WON } }, ctx);
+  t.eq('all three landing wins it', won.state, 'won');
+  // The bug this guards: keying the payout off whether a decimal could be
+  // computed paid out null on a winning parlay.
+  t.eq('and it pays exactly what the slip promised', won.returnCents, 7200);
+
+  const lost = DV.deriveLock({ ...stored, overrides: { 0: G.STATE.LOST } }, ctx);
+  t.eq('one miss loses it', lost.state, 'lost');
+  t.eq('and it pays nothing', lost.returnCents, 0);
+
+  // A leg falling out would have the book reprice, and with no leg prices
+  // there is nothing to reprice by. Say so rather than overpay.
+  const pushed = DV.deriveLock({ ...stored, overrides: { 0: G.STATE.PUSH, 1: G.STATE.WON, 2: G.STATE.WON } }, ctx);
+  t.ok('a dropped leg is flagged for a human', pushed.needsReview === true);
+  t.ok('and the flag says why', pushed.repricedByHand === true);
+}
+
+// ---------------------------------------------------------------------------
 // A settled lock is still your lock
 // ---------------------------------------------------------------------------
 
@@ -1676,6 +1787,7 @@ export function runAll(fixtures) {
   testLeague(t);
   testStore(t, snaps);
   testSlip(t);
+  testPropSlip(t);
   testSettledStillYours(t);
   testFoldedPips(t);
   testPromisedPayout(t);
