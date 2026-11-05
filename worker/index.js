@@ -181,7 +181,7 @@ async function leagueDetail(db, code, uid) {
 /** Every lock in a league, with its legs, shaped the way the client stores them. */
 async function leagueLocks(db, code) {
   const { results: locks } = await db.prepare(
-    `SELECT id, code, uid, week_key, stake_cents, boost_pct, book, placed_ts, eligible,
+    `SELECT id, code, uid, week_key, stake_cents, payout_cents, boost_pct, book, placed_ts, eligible,
             settled_state, settled_return_cents, settled_ts
        FROM locks WHERE code = ? ORDER BY placed_ts DESC LIMIT 500`,
   ).bind(code).all();
@@ -211,6 +211,7 @@ async function leagueLocks(db, code) {
     uid: l.uid,
     weekKey: l.week_key,
     stakeCompCents: l.stake_cents,
+    payoutCents: l.payout_cents === undefined ? null : l.payout_cents,
     boostPct: l.boost_pct,
     book: l.book,
     placedAt: l.placed_ts * 1000,
@@ -471,12 +472,18 @@ export async function route(method, path, body, env, claims, cors) {
     const firstStart = Number.isInteger(body.firstStartAt) ? Math.floor(body.firstStartAt / 1000) : null;
     const eligible = firstStart === null || ts < firstStart ? 1 : 0;
 
+    // The payout the slip promised. A positive whole number of cents or
+    // nothing at all: a zero or a negative payout is not a slip, it is a
+    // typo, and it would settle every winning lock at nothing.
+    const payoutCents = Number.isInteger(body.payoutCents) && body.payoutCents > 0
+      ? body.payoutCents : null;
+
     const stmts = [
       db.prepare(
-        `INSERT INTO locks (id, code, uid, week_key, stake_cents, boost_pct, book, placed_ts, submitted_ts,
-                            first_start_ts, eligible, source, created_ts)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      ).bind(id, body.code, uid, body.weekKey, body.stakeCents, body.boostPct || 0,
+        `INSERT INTO locks (id, code, uid, week_key, stake_cents, payout_cents, boost_pct, book,
+                            placed_ts, submitted_ts, first_start_ts, eligible, source, created_ts)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).bind(id, body.code, uid, body.weekKey, body.stakeCents, payoutCents, body.boostPct || 0,
         body.book || null, placed, ts, firstStart, eligible, body.source || 'manual', ts),
     ];
     body.picks.forEach((p, i) => {

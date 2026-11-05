@@ -140,6 +140,7 @@ export function cloudBackend(getState) {
         code: lock.code,
         weekKey: lock.weekKey,
         stakeCents: lock.stakeCompCents,
+        payoutCents: lock.payoutCents,
         boostPct: lock.boostPct,
         picks: lock.picks,
         placedAt: lock.placedAt,

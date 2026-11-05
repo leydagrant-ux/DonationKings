@@ -197,6 +197,23 @@ eq('nothing graded is stored', env.raw.prepare('SELECT settled_state FROM locks 
 eq('a lock in a league you are not in is refused', (await call(env, 'u-ck', 'POST', '/v1/locks', lockBody)).status, 403);
 eq('an invalid lock is refused', (await call(env, 'u-grant', 'POST', '/v1/locks', { ...lockBody, stakeCents: -1 })).status, 400);
 
+sec('worker: the payout a slip promised');
+// It has to survive the round trip, because it is what settles the lock.
+eq('a lock without one stores nothing', env.raw.prepare('SELECT payout_cents FROM locks WHERE id = ?').get(LOCK).payout_cents, null);
+r = await call(env, 'u-grant', 'POST', '/v1/locks', { ...lockBody, payoutCents: 20120 });
+eq('one with a payout is accepted', r.status, 200);
+const PAID = r.body.id;
+eq('and it is stored as given', env.raw.prepare('SELECT payout_cents FROM locks WHERE id = ?').get(PAID).payout_cents, 20120);
+const back = (await call(env, 'u-grant', 'GET', `/v1/leagues/${CODE}`)).body.locks.find((l) => l.id === PAID);
+eq('and comes back to the client', back.payoutCents, 20120);
+// A zero or negative payout is a typo, and storing it would settle a
+// winning lock at nothing.
+for (const bad of [0, -5, 1.5, '20120', null]) {
+  r = await call(env, 'u-grant', 'POST', '/v1/locks', { ...lockBody, payoutCents: bad });
+  eq(`a payout of ${JSON.stringify(bad)} is ignored, not stored`,
+    env.raw.prepare('SELECT payout_cents FROM locks WHERE id = ?').get(r.body.id).payout_cents, null);
+}
+
 sec('worker: backdating is refused');
 // Submitted after the first game started: still tracked, but it cannot count.
 r = await call(env, 'u-grant', 'POST', '/v1/locks', { ...lockBody, firstStartAt: Date.now() - 3600000 });

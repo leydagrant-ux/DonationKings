@@ -29,7 +29,7 @@ import { localBackend, cloudBackend } from './backend.js';
 import { isConfigured } from './config.js';
 import { STATE } from './grade.js';
 import { parseAmerican } from './odds.js';
-import { autoprice } from './slip.js';
+import { autoprice, repayout } from './slip.js';
 import * as ST from './stats.js';
 import * as SV from './ui-stats.js';
 
@@ -167,7 +167,7 @@ async function ensureSlate(leagues) {
   // Prices arriving is the whole point of the fetch, so apply them to
   // whatever is on the form right now rather than waiting for the next
   // keystroke to notice the slate turned up.
-  if (draft) draft = autoprice(draft, pricingEvents());
+  if (draft) draft = repayout(autoprice(draft, pricingEvents()));
   if (draft || scan) render();
 }
 
@@ -579,7 +579,7 @@ root.addEventListener('click', async (e) => {
     // Legs the slip priced keep that price: it is what the book actually
     // gave them, which a current quote is not. Only legs the screenshot left
     // unpriced get filled in from the feed.
-    draft = autoprice(d, pricingEvents());
+    draft = repayout(autoprice(d, pricingEvents()));
     scan = null;
     ensureSlate(draftLeagues());
     return render();
@@ -624,7 +624,7 @@ root.addEventListener('click', async (e) => {
         code: draft.code || lg.code,
         uid: state.me.uid,
         stakeCents: draft.stakeCents,
-        boostPct: draft.boostPct,
+        payoutCents: draft.payoutCents,
         picks: draft.picks.map((p) => ({ text: p.text.trim(), league: p.league, odds: parseAmerican(p.odds) })),
       }),
       weekKey: weekKey(),
@@ -696,12 +696,23 @@ function readDraftInputs() {
     };
   });
   const stake = document.getElementById('entry-stake');
-  const boost = document.getElementById('entry-boost');
+  const payout = document.getElementById('entry-payout');
   const code = document.getElementById('entry-league');
+
+  // Same rule as a leg price: if the box no longer holds what we put there,
+  // it came off a slip and is not ours to recompute.
+  const shown = draft.payoutCents === null || draft.payoutCents === undefined
+    ? '' : (draft.payoutCents / 100).toFixed(2);
+  const typedPayout = payout && payout.value.trim() !== shown.trim();
+
   draft = {
+    ...draft,
     code: code ? code.value : draft.code,
     stakeCents: stake ? centsFrom(stake.value) : draft.stakeCents,
-    boostPct: boost ? Number(boost.value) || 0 : draft.boostPct,
+    payoutCents: payout
+      ? (payout.value.trim() ? centsFrom(payout.value) : null)
+      : draft.payoutCents,
+    payoutAuto: payout ? (draft.payoutAuto !== false && !typedPayout) : draft.payoutAuto,
     picks,
   };
 }
@@ -735,12 +746,12 @@ root.addEventListener('change', async (e) => {
   }
 
   if (!draft) return;
-  if (e.target.matches('.entry-text, .entry-odds, .entry-sport, #entry-stake, #entry-boost, #entry-league')) {
+  if (e.target.matches('.entry-text, .entry-odds, .entry-sport, #entry-stake, #entry-payout, #entry-league')) {
     readDraftInputs();
     // Switching a leg to a league nobody has a lock in pulls that slate, so
     // the price for it appears a moment later.
     if (e.target.matches('.entry-sport')) ensureSlate(draftLeagues());
-    draft = autoprice(draft, pricingEvents());
+    draft = repayout(autoprice(draft, pricingEvents()));
     render();
   }
   return undefined;

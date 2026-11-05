@@ -1,0 +1,21 @@
+-- Records what a slip says it pays, which is what actually settles.
+--
+-- Applied after the initial schema with:
+--   cd worker; .\apply-schema.ps1 -Remote -File .\migrations\002-payout-cents.sql
+-- (schema.sql also contains this, so a fresh database needs no migration.)
+--
+-- Why this exists: the payout a book promises cannot be recovered from the
+-- leg prices. A profit boost, a same-game price the book sets jointly rather
+-- than by multiplying, a promo, or plain rounding all move it, sometimes by a
+-- lot. One real slip: $20.00 bought, legs that multiply out to $171.00, and
+-- the book paid $201.20. Settling that from the prices short-changes the
+-- bettor by $30.20 and the app looks confident doing it.
+--
+-- It replaces boost_pct, which could only express one of those causes and
+-- only in whole percent. boost_pct stays so locks placed before this still
+-- settle the way they were entered.
+--
+-- NULL means no promise was recorded, and settlement falls back to the leg
+-- prices exactly as before, so existing rows need no backfill.
+
+ALTER TABLE locks ADD COLUMN payout_cents INTEGER;

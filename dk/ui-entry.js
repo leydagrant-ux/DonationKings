@@ -152,7 +152,12 @@ export function entryFormHTML(draft, leagues, events) {
   const complete = draft.picks.filter((p) => String(p.text || '').trim() && parseAmerican(p.odds) !== null);
   const priced = complete.length === draft.picks.length && draft.picks.length > 0;
   const dec = priced ? parlayDecimal(odds) : null;
-  const toWin = dec ? boostedReturnCents(draft.stakeCents, dec, draft.boostPct) : null;
+  // The payout on the form is the one that settles, so the profit beside it
+  // is worked back from that figure and not from the leg prices. Otherwise
+  // correcting the payout from a slip would leave the profit disagreeing
+  // with it on the same screen.
+  const computed = dec ? boostedReturnCents(draft.stakeCents, dec, draft.boostPct) : null;
+  const toWin = draft.payoutCents === null || draft.payoutCents === undefined ? computed : draft.payoutCents;
 
   return `<div class="entry">
     ${leagues.length > 1 ? `
@@ -168,32 +173,34 @@ export function entryFormHTML(draft, leagues, events) {
       <button class="addleg" data-action="add-leg">${ICONS.add} Add leg</button>
     </div>
 
-    <!-- Bought is the one number only you know. Everything beside it is
-         computed from the legs, which is why it is shown and not typed. -->
+    <!-- Bought is the one number only you know. To Pay is computed from the
+         legs, which is why it is shown and not typed.
+
+         "To Pay" is the book's wording and it means the WHOLE payout, stake
+         included: $9.68 bought, $22.00 to pay. Calling it "to win" and
+         subtracting the stake reads as more natural English and is wrong, so
+         the profit is named separately in the summary line below. -->
     <div class="entry-money">
       <label class="field"><span>Bought</span>
         <input id="entry-stake" inputmode="decimal" value="${(draft.stakeCents / 100).toFixed(2)}"></label>
-      <div class="field"><span>To win</span>
-        <output class="entry-payout ${priced ? '' : 'muted'}">${priced ? money(toWin - draft.stakeCents) : '--'}</output></div>
+      <label class="field"><span>To Pay</span>
+        <input id="entry-payout" class="entry-payout ${draft.payoutAuto ? 'auto' : ''}"
+               inputmode="decimal" placeholder="--"
+               value="${draft.payoutCents === null || draft.payoutCents === undefined ? '' : (draft.payoutCents / 100).toFixed(2)}"></label>
     </div>
+    <p class="field-note">
+      ${draft.payoutAuto
+        ? 'Worked out from the legs. If your slip says something else, type that: a boost or a same-game price will not match the arithmetic, and your slip is the one that pays.'
+        : 'Taken from your slip, so this is what settles.'}
+    </p>
 
     <div class="entry-summary ${priced ? '' : 'muted'}">
       ${priced
         ? `<span>${draft.picks.length} ${draft.picks.length === 1 ? 'leg' : 'legs'} at <b>${americanStr(Math.round((dec >= 2 ? (dec - 1) * 100 : -100 / (dec - 1))))}</b></span>
-           <span>Payout <b>${money(toWin)}</b></span>
+           <span>Profit <b>${money(toWin - draft.stakeCents)}</b></span>
            <span class="entry-prob">${Math.round(impliedProb(dec) * 1000) / 10}% implied</span>`
         : '<span>Type each leg. Prices fill in from the book on their own.</span>'}
     </div>
-
-    <!-- A profit boost is a sportsbook token ("25% profit boost"). It lifts
-         winnings only, never the stake back, so it is off unless asked for
-         and tucked away rather than sitting in the main flow. -->
-    <details class="entry-extra" ${draft.boostPct ? 'open' : ''}>
-      <summary>Profit boost${draft.boostPct ? ` · ${esc(draft.boostPct)}%` : ''}</summary>
-      <label class="field"><span>Boost %</span>
-        <input id="entry-boost" inputmode="numeric" value="${draft.boostPct || 0}"></label>
-      <p class="field-note">Only if your book gave you one. It raises the winnings, not the stake.</p>
-    </details>
 
     <button class="bigbtn" data-action="save-lock" ${priced ? '' : 'disabled'}>Add lock</button>
     <button class="linkbtn" data-action="cancel-lock">Cancel</button>

@@ -119,6 +119,44 @@ export function boostedReturnCents(stakeCents, dec, boostPct) {
   return stakeCents + roundCents((total - stakeCents) * (1 + boostPct / 100));
 }
 
+/**
+ * Settle at the payout the slip actually promised, not the one the leg
+ * prices come to.
+ *
+ * The two disagree more often than not, and for good reasons: a profit
+ * boost, a same-game price the book sets jointly rather than by multiplying,
+ * a promo, or plain rounding. The slip is the authority. It is the number
+ * the book will really hand over, so it is the number that settles.
+ *
+ * The complication is a pushed leg. A push drops that leg and reprices the
+ * parlay, so the promised figure no longer applies as written. What carries
+ * across is the RATIO of promised profit to computed profit, so the same
+ * boost or correlation discount applies to whatever price survives. With
+ * nothing pushed the ratio is exactly 1 and this returns the promised figure
+ * to the cent.
+ *
+ * Applied to profit, never to the total: the stake comes back either way,
+ * and scaling it is the error that overpays every boosted slip.
+ *
+ *   fullDec       the decimal price of every leg as written
+ *   settledDec    the price of the legs that actually counted
+ *   promisedCents what the slip says it pays in full, or null for neither
+ */
+export function promisedReturnCents(stakeCents, fullDec, settledDec, promisedCents) {
+  const settledTotal = totalReturnCents(stakeCents, settledDec);
+  if (settledTotal === null) return null;
+  if (promisedCents === null || promisedCents === undefined) return settledTotal;
+
+  const fullTotal = totalReturnCents(stakeCents, fullDec);
+  const fullProfit = fullTotal === null ? null : fullTotal - stakeCents;
+  // Nothing to scale against: a parlay that never promised a profit cannot
+  // tell us anything about one, so take the promise at face value.
+  if (!fullProfit) return promisedCents;
+
+  const ratio = (promisedCents - stakeCents) / fullProfit;
+  return stakeCents + roundCents((settledTotal - stakeCents) * ratio);
+}
+
 // ---------------------------------------------------------------------------
 // Reconciliation
 // ---------------------------------------------------------------------------

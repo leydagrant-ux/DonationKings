@@ -282,36 +282,6 @@ const fmtPlaced = (ts) => {
  *   returnCents, oddsAmerican, boostPct, placedAt, eligible, correlated, live
  * }
  */
-/**
- * The folded card's one line: a pip per leg, then a count.
- *
- * Folding a lock should put the detail away, not the state. Six parlays on a
- * Sunday are unreadable fully expanded, and a row of pips still says at a
- * glance which ones are alive and which are already gone.
- */
-function legCountLine(lock) {
-  const legs = lock.legs || [];
-  if (!legs.length) return `<span class="folded-note">No leg detail on this one</span>`;
-
-  const n = { won: 0, lost: 0, live: 0, open: 0 };
-  const pips = legs.map((l) => {
-    const v = l.verdict || {};
-    let cls;
-    if (v.state === STATE.WON) { cls = 'won'; n.won++; }
-    else if (v.state === STATE.LOST) { cls = 'lost'; n.lost++; }
-    else if (l.snapshot && l.snapshot.state === 'in') { cls = 'live'; n.live++; }
-    else { cls = 'open'; n.open++; }
-    return `<span class="pip ${cls}"></span>`;
-  }).join('');
-
-  const bits = [];
-  if (n.won) bits.push(`${n.won} hit`);
-  if (n.lost) bits.push(`${n.lost} missed`);
-  if (n.live) bits.push(`${n.live} live`);
-  if (n.open) bits.push(`${n.open} to go`);
-  return `<span class="pips">${pips}</span><span class="folded-note">${esc(bits.join(' · '))}</span>`;
-}
-
 export function lockCardHTML(lock, { collapsed = false } = {}) {
   const st = lock.roll.state;
   const won = st === STATE.WON;
@@ -344,24 +314,26 @@ export function lockCardHTML(lock, { collapsed = false } = {}) {
         ? `<span class="sep">|</span><span class="label">Paid:</span><span class="val paid">${money(lock.returnCents)}</span>`
         : ''}
       ${st === STATE.PENDING && lock.toWinCents
-        ? `<span class="sep">|</span><span class="label">To win:</span><span class="val paid">${money(lock.toWinCents - lock.stakeCompCents)}</span>`
+        ? `<span class="sep">|</span><span class="label">To Pay:</span><span class="val paid">${money(lock.toWinCents)}</span>`
         : ''}
     </div>
 
-    ${lock.boostPct || lock.correlated || lock.capped ? `<div class="badges">
-      ${lock.boostPct ? `<span class="badge boost">${esc(lock.boostPct)}% Boost</span>` : ''}
+    ${lock.boosted || lock.correlated || lock.capped ? `<div class="badges">
+      ${lock.boosted ? `<span class="badge boost">${lock.boostPct ? `${esc(lock.boostPct)}% ` : ''}Boost</span>` : ''}
       ${lock.correlated ? `<span class="badge sgp">Same Game</span>` : ''}
       ${lock.capped ? `<span class="badge capped">Stake capped to bankroll</span>` : ''}
     </div>` : ''}
 
-    ${collapsed
-      ? `<div class="legs-folded">${legCountLine(lock)}</div>`
-      : `<div class="legs">${legsHTML(lock.legs, lock.id)}</div>`}
+    <!-- Folded, the legs and the box scores go away entirely. The names
+         line under the title is what carries the lock at a glance, which is
+         exactly how the book does it: nothing stands in for the legs, they
+         are simply not there until asked for. -->
+    ${collapsed ? '' : `<div class="legs">${legsHTML(lock.legs, lock.id)}</div>`}
 
     <div class="card-foot">
       <div class="card-actions">
         ${lock.id ? `<button class="ghostbtn fold" data-action="fold-lock" data-id="${esc(lock.id)}" aria-expanded="${!collapsed}">
-          ${collapsed ? 'Show legs' : 'Hide legs'} <span class="chev ${collapsed ? 'down' : ''}">${ICONS.chevron}</span>
+          ${collapsed ? 'View Legs' : 'Hide Legs'} <span class="chev ${collapsed ? 'down' : ''}">${ICONS.chevron}</span>
         </button>` : ''}
       </div>
       <div class="card-meta">

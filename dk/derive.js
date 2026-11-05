@@ -11,7 +11,7 @@
 import { resolveLeg, AUTO_GRADE_MIN } from './resolve.js';
 import { gradeLeg, STATE } from './grade.js';
 import { settleParlay } from './parlay.js';
-import { parlayDecimal, boostedReturnCents, impliedProb } from './odds.js';
+import { parlayDecimal, boostedReturnCents, promisedReturnCents, totalReturnCents, impliedProb } from './odds.js';
 
 const OVERRIDABLE = new Set([STATE.WON, STATE.LOST, STATE.PUSH, STATE.VOID]);
 
@@ -84,10 +84,17 @@ export function deriveLock(stored, ctx) {
   const settled = settleParlay(priced, stored.stakeCompCents);
   const fullDec = parlayDecimal(picks.map((p) => p.odds));
 
-  // A boost lifts profit only, over whatever price survived pushed legs.
+  // What it pays. The slip's own figure wins when there is one, because the
+  // book's number is the money that actually changes hands and the leg
+  // prices alone cannot reproduce it: a boost, a same-game price or plain
+  // rounding all move it. `boostPct` is the older way of saying the same
+  // thing and still settles locks saved before the payout was recorded.
+  const hasPromise = stored.payoutCents !== null && stored.payoutCents !== undefined;
   const paid = settled.returnCents === null || settled.returnCents === 0
     ? settled.returnCents
-    : boostedReturnCents(stored.stakeCompCents, settled.dec, stored.boostPct);
+    : hasPromise
+      ? promisedReturnCents(stored.stakeCompCents, fullDec, settled.dec, stored.payoutCents)
+      : boostedReturnCents(stored.stakeCompCents, settled.dec, stored.boostPct);
 
   const eventIds = legs.map((l) => l.leg.eventId).filter(Boolean);
 
@@ -97,7 +104,16 @@ export function deriveLock(stored, ctx) {
     roll: settled,
     state: settled.state,
     returnCents: paid,
-    toWinCents: boostedReturnCents(stored.stakeCompCents, fullDec, stored.boostPct),
+    // What it pays if every leg lands. The slip's figure is already that
+    // number, so it is used as given rather than recomputed.
+    toWinCents: hasPromise
+      ? stored.payoutCents
+      : boostedReturnCents(stored.stakeCompCents, fullDec, stored.boostPct),
+    // True when the slip pays more than the leg prices alone would, which is
+    // a boost, a promo, or a price the book set in your favour.
+    boosted: hasPromise
+      ? stored.payoutCents > (totalReturnCents(stored.stakeCompCents, fullDec) || 0)
+      : !!stored.boostPct,
     impliedPct: fullDec ? Math.round(impliedProb(fullDec) * 1000) / 10 : undefined,
     live: legs.some((l) => l.snapshot && l.snapshot.state === 'in'),
     correlated: new Set(eventIds).size < eventIds.length,

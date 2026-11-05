@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS locks (
   -- getting this from the settle time bleeds bankroll across every boundary.
   week_key      TEXT NOT NULL,
   stake_cents   INTEGER NOT NULL CHECK (stake_cents > 0),
+  -- What the slip says it pays in full, stake included. The authority on
+  -- settlement: a boost, a same-game price or the book's own rounding all
+  -- make the leg prices alone disagree with what actually gets paid, and
+  -- the slip is the side that is right. NULL settles from the prices.
+  payout_cents  INTEGER CHECK (payout_cents IS NULL OR payout_cents > 0),
+  -- Superseded by payout_cents, kept so locks placed before it still settle.
   boost_pct     INTEGER NOT NULL DEFAULT 0 CHECK (boost_pct >= 0 AND boost_pct <= 500),
   book          TEXT,
   placed_ts     INTEGER NOT NULL,            -- what the slip said, or submit time

@@ -66,8 +66,8 @@ export const leaveLeague = (code) => call('POST', `/v1/leagues/${code}/leave`, {
  * but the Worker uses its own clock for "now", so a client cannot claim it
  * got in before kickoff when it did not.
  */
-export const createLock = ({ code, weekKey, stakeCents, boostPct, picks, placedAt, firstStartAt, book, source }) =>
-  call('POST', '/v1/locks', { code, weekKey, stakeCents, boostPct, picks, placedAt, firstStartAt, book, source });
+export const createLock = ({ code, weekKey, stakeCents, payoutCents, boostPct, picks, placedAt, firstStartAt, book, source }) =>
+  call('POST', '/v1/locks', { code, weekKey, stakeCents, payoutCents, boostPct, picks, placedAt, firstStartAt, book, source });
 
 export const deleteLock = (id) => call('DELETE', `/v1/locks/${id}`);
 

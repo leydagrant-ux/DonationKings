@@ -116,13 +116,17 @@ export function importState(text) {
  * progress are all derived from live data every render, so a stale grade can
  * never be persisted and then believed.
  */
-export function newLock({ code, uid: ownerUid, stakeCents, picks, placedAt, boostPct, book }) {
+export function newLock({ code, uid: ownerUid, stakeCents, picks, placedAt, boostPct, payoutCents, book }) {
   const at = placedAt === undefined ? Date.now() : placedAt;
   return {
     id: uid('L'),
     code,
     uid: ownerUid,
     stakeCompCents: stakeCents,
+    // What the slip says it pays in full. The authority on settlement, kept
+    // because the leg prices alone cannot reproduce it once a boost or a
+    // same-game price is involved. Null means settle from the prices.
+    payoutCents: payoutCents === undefined || payoutCents === null ? null : payoutCents,
     boostPct: boostPct || 0,
     book: book || null,
     placedAt: at,

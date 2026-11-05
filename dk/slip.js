@@ -11,7 +11,7 @@
 // rather than a wrong settlement.
 
 import { parseLegText, matchStat, resolveTeam } from './resolve.js';
-import { parseAmerican } from './odds.js';
+import { parseAmerican, parlayDecimal, totalReturnCents } from './odds.js';
 import { LEAGUES, priceFor } from './espn.js';
 
 /** Money, in cents, from "$1,234.56" / "1234.56" / "$25". */
@@ -363,4 +363,29 @@ export function autoprice(draft, events) {
   });
 
   return changed ? { ...draft, picks } : draft;
+}
+
+/**
+ * Keep the payout in step with the legs, until somebody corrects it.
+ *
+ * Same rule as the prices: a figure this computed is ours to recompute, a
+ * figure typed from a slip is theirs and is left exactly alone. That is the
+ * whole point of letting it be typed. The leg prices cannot reproduce what a
+ * book pays on a boosted or same-game slip, so when the two disagree the
+ * slip is right and the arithmetic is wrong.
+ */
+export function repayout(draft) {
+  if (!draft || !Array.isArray(draft.picks)) return draft;
+  const has = draft.payoutCents !== null && draft.payoutCents !== undefined;
+  if (has && !draft.payoutAuto) return draft; // typed from a slip
+
+  const odds = draft.picks.map((p) => parseAmerican(p.odds));
+  if (!odds.length || odds.some((o) => o === null)) {
+    // Not every leg is priced yet, so there is no payout to show.
+    return has ? { ...draft, payoutCents: null, payoutAuto: true } : draft;
+  }
+
+  const want = totalReturnCents(draft.stakeCents, parlayDecimal(odds));
+  if (want === draft.payoutCents) return draft;
+  return { ...draft, payoutCents: want, payoutAuto: true };
 }

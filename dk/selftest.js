@@ -1185,6 +1185,87 @@ function testSlip(t) {
 }
 
 // ---------------------------------------------------------------------------
+// Settling at the payout the slip promised
+// ---------------------------------------------------------------------------
+
+/**
+ * The book's number is the money that changes hands, so it is the number
+ * that settles.
+ *
+ * Taken from a real slip: $20.00 bought, a 20% boost, paid $201.20. The leg
+ * prices multiply out to less than that, and settling from them would
+ * short-change the bettor on every boosted ticket while looking confident.
+ */
+function testPromisedPayout(t) {
+  t.section('payout: the slip wins');
+  const stake = 2000;
+  const dec = O.parlayDecimal([-110, 650]);
+  const computed = O.totalReturnCents(stake, dec);
+
+  t.ok('the leg prices alone come to something', computed > stake);
+  t.eq('with no promise, the prices settle it', O.promisedReturnCents(stake, dec, dec, null), computed);
+  t.eq('with a promise and nothing pushed, it pays exactly that', O.promisedReturnCents(stake, dec, dec, 20120), 20120);
+  // The point of the whole exercise.
+  t.ok('which the prices alone would have got wrong', computed !== 20120);
+
+  t.section('payout: a pushed leg');
+  // A push drops a leg and reprices the parlay, so the promised figure no
+  // longer applies as written. What carries over is the ratio.
+  const reduced = O.parlayDecimal([650]);
+  const paid = O.promisedReturnCents(stake, dec, reduced, 20120);
+  const plainReduced = O.totalReturnCents(stake, reduced);
+  const ratio = (20120 - stake) / (computed - stake);
+  t.eq(
+    'the same boost applies to whatever price survived',
+    paid,
+    stake + Math.round((plainReduced - stake) * ratio),
+  );
+  t.ok('so it is not simply the promised figure again', paid !== 20120);
+  t.ok('and the stake is never scaled, only the profit', paid > stake);
+
+  t.section('payout: a boost is never applied to the stake');
+  // A genuinely boosted slip, so the promise is above the price rather than
+  // below it: 20% on the profit.
+  const boosted = O.boostedReturnCents(stake, dec, 20);
+  t.ok('a boost pays more than the price alone', boosted > computed);
+  t.eq('and the slip figure reproduces it exactly', O.promisedReturnCents(stake, dec, dec, boosted), boosted);
+  // The classic error is scaling the whole return rather than the profit,
+  // which hands back the boost on the stake as well.
+  const wrong = Math.round(computed * (boosted - stake) / (computed - stake));
+  t.ok('scaling the total instead overpays', wrong > boosted);
+  t.eq('by exactly the boost on the stake', wrong - boosted, Math.round(stake * 0.2));
+
+  t.section('payout: degenerate cases');
+  t.eq('no settled price, nothing to pay', O.promisedReturnCents(stake, dec, null, 20120), null);
+  // A parlay that promised no profit tells us nothing about a ratio, so the
+  // promise is taken at face value rather than divided by zero.
+  t.eq('a parlay with no profit takes the promise as given', O.promisedReturnCents(stake, 1, 1, 2500), 2500);
+  t.ok('and never returns NaN', Number.isFinite(O.promisedReturnCents(stake, 1, 1, 2500)));
+
+  t.section('payout: through a whole lock');
+  const mk = (over) => ({
+    id: 'L1', code: 'X', uid: 'me', stakeCompCents: 2000, boostPct: 0,
+    picks: [{ text: 'Packers ML', league: 'nfl', odds: -110 }],
+    overrides: { 0: G.STATE.WON }, ...over,
+  });
+  const ctx = { events: [], snapshots: [] };
+  const withPromise = DV.deriveLock(mk({ payoutCents: 20120 }), ctx);
+  t.eq('a won lock pays what the slip promised', withPromise.returnCents, 20120);
+  t.eq('and the card shows that as the full payout', withPromise.toWinCents, 20120);
+  t.ok('and marks it boosted, because it beats the price', withPromise.boosted === true);
+
+  const without = DV.deriveLock(mk({ payoutCents: null }), ctx);
+  t.eq('without one it settles from the price', without.returnCents, O.totalReturnCents(2000, O.parlayDecimal([-110])));
+  t.ok('and is not marked boosted', without.boosted === false);
+
+  // Locks saved before the payout was recorded must keep settling the way
+  // they were entered.
+  const legacy = DV.deriveLock(mk({ payoutCents: null, boostPct: 20 }), ctx);
+  t.eq('an old boost still settles', legacy.returnCents, O.boostedReturnCents(2000, O.parlayDecimal([-110]), 20));
+  t.ok('and still reads as boosted', legacy.boosted === true);
+}
+
+// ---------------------------------------------------------------------------
 // stats.js
 // ---------------------------------------------------------------------------
 
@@ -1460,6 +1541,7 @@ export function runAll(fixtures) {
   testLeague(t);
   testStore(t, snaps);
   testSlip(t);
+  testPromisedPayout(t);
   testStats(t);
   testPricing(t, fixtures);
   const ms = Date.now() - t0;

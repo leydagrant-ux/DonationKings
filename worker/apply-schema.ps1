@@ -13,15 +13,21 @@
 # Usage:
 #   .\apply-schema.ps1            # local development database
 #   .\apply-schema.ps1 -Remote    # the real one
+#   .\apply-schema.ps1 -Remote -File .\migrations\002-payout-cents.sql
+#
+# -File sends any other .sql file the same way, which is how the migrations
+# in .\migrations are applied to a database that already exists. schema.sql
+# carries the same changes, so a database created from scratch needs none of
+# them.
 
-param([switch]$Remote)
+param([switch]$Remote, [string]$File)
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$file = Join-Path $here 'schema.sql'
+$file = if ($File) { $File } else { Join-Path $here 'schema.sql' }
 
 if (-not (Test-Path $file)) {
-    Write-Host "Could not find schema.sql next to this script." -ForegroundColor Red
+    Write-Host "Could not find $file." -ForegroundColor Red
     exit 1
 }
 
@@ -38,7 +44,7 @@ $where = 'local'
 if ($Remote) { $where = 'REMOTE' }
 
 Write-Host ""
-Write-Host "Applying schema to the $where database" -ForegroundColor Cyan
+Write-Host "Applying $(Split-Path -Leaf $file) to the $where database" -ForegroundColor Cyan
 Write-Host "  $($sql.Length) characters, $statements statements"
 Write-Host ""
 
@@ -50,7 +56,7 @@ if ($Remote) {
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
-    Write-Host "Done. Schema applied to the $where database." -ForegroundColor Green
+    Write-Host "Done. Applied to the $where database." -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "Failed with exit code $LASTEXITCODE." -ForegroundColor Red
