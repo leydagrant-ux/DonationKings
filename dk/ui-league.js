@@ -49,7 +49,7 @@ export function leagueHeaderHTML(league, weekKey, uid) {
  * is the same thing broken down.
  */
 export function standingsModeHTML(mode) {
-  const modes = [['week', 'This week'], ['all', 'All time'], ['history', 'History']];
+  const modes = [['week', 'This week'], ['live', 'Live locks'], ['all', 'All time'], ['history', 'History']];
   return `<div class="chiprow modes">
     ${modes.map(([id, label]) => `<button class="chip" data-mode="${id}" aria-pressed="${id === mode}">${label}</button>`).join('')}
   </div>`;
@@ -64,10 +64,18 @@ export function standingsModeHTML(mode) {
  * fact about somebody's betting. It resets every Monday and takes no account
  * of what was actually staked, so it says very little.
  */
-export function standingsHTML(rows, meUid, mode = 'week') {
+/**
+ * The standings, with each row opening onto what that person has running.
+ *
+ * `openUid` is whoever is expanded, and `cardsFor` renders their live locks.
+ * Watching somebody else sweat a parlay is most of the point of a league, so
+ * their board is one tap from their name rather than somewhere else entirely.
+ */
+export function standingsHTML(rows, meUid, mode = 'week', { openUid = null, cardsFor = null } = {}) {
   if (!rows.length) return `<div class="empty">${crownSVG()}<div>Nobody has placed a lock yet.</div></div>`;
 
   return `<div class="lb">${rows.map((r) => {
+    const open = r.uid === openUid;
     const cls = r.profitCents > 0 ? 'up' : r.profitCents < 0 ? 'down' : '';
     const record = [
       `${r.won}-${r.lost}${r.pushed ? `-${r.pushed}` : ''}`,
@@ -75,17 +83,22 @@ export function standingsHTML(rows, meUid, mode = 'week') {
       r.roi !== null ? `${r.roi > 0 ? '+' : ''}${Math.round(r.roi * 100)}% ROI` : '',
     ].filter(Boolean).join(' · ');
 
-    return `<div class="lb-row ${r.rank === 1 ? 'lead' : ''} ${r.uid === meUid ? 'me' : ''}">
-      <span class="lb-rank">${r.rank}</span>
-      <span class="avatar sm">${esc(r.initials)}</span>
-      <span class="lb-who">
-        <span class="lb-name">${esc(r.name)}${r.role === ROLE.OWNER ? '<span class="crown-mini" title="League owner"></span>' : ''}</span>
-        <span class="lb-sub">${esc(record)}</span>
-      </span>
-      <span class="lb-right">
-        <span class="lb-amt ${cls}">${signedMoney(r.profitCents)}</span>
-        <span class="lb-risk">${money(r.stakedCents)} wagered${r.atRiskCents ? `, ${money(r.atRiskCents)} live` : ''}</span>
-      </span>
+    return `<div class="lb-item">
+      <button class="lb-row ${r.rank === 1 ? 'lead' : ''} ${r.uid === meUid ? 'me' : ''} ${open ? 'open' : ''}"
+              data-action="open-member" data-uid="${esc(r.uid)}" aria-expanded="${open}">
+        <span class="lb-rank">${r.rank}</span>
+        <span class="avatar sm">${esc(r.initials)}</span>
+        <span class="lb-who">
+          <span class="lb-name">${esc(r.name)}${r.role === ROLE.OWNER ? '<span class="crown-mini" title="League owner"></span>' : ''}</span>
+          <span class="lb-sub">${esc(record)}</span>
+        </span>
+        <span class="lb-right">
+          <span class="lb-amt ${cls}">${signedMoney(r.profitCents)}</span>
+          <span class="lb-risk">${money(r.stakedCents)} wagered${r.atRiskCents ? `, ${money(r.atRiskCents)} live` : ''}</span>
+        </span>
+        <span class="lb-chev ${open ? 'down' : ''}">${ICONS.chevron}</span>
+      </button>
+      ${open && cardsFor ? `<div class="lb-open">${cardsFor(r)}</div>` : ''}
     </div>`;
   }).join('')}</div>`;
 }

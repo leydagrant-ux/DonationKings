@@ -251,6 +251,14 @@ const SLIP_PROMPT = [
   'Keep numbers, prices and lines character for character: do not round, reorder or tidy them.',
   'Put each selection on its own line, and keep its market on the next line exactly as shown.',
   'Include the stake, the payout, the odds and any boost.',
+  // Daily-fantasy slips put the chosen side in a pair of buttons rather than
+  // in any words, and only the chosen one is lit up. That highlight is the
+  // only record of which way the pick went, so it is read as a fact about
+  // the picture, not inferred: an unlit guess settles the wrong side.
+  'If a pick offers two buttons such as More and Less, or Over and Under,',
+  'write ONLY the one that is visibly selected, highlighted or filled in,',
+  'on its own line straight after that pick.',
+  'If neither of the two looks selected, write nothing for that pick rather than picking one.',
   'Do not summarize, do not explain, do not add anything that is not printed on the slip.',
   'If part of it is unreadable, write [unclear] there rather than guessing.',
 ].join(' ');

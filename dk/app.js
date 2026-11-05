@@ -29,7 +29,9 @@ import { localBackend, cloudBackend } from './backend.js';
 import { isConfigured } from './config.js';
 import { STATE } from './grade.js';
 import { parseAmerican } from './odds.js';
-import { autoprice, repayout } from './slip.js';
+import { LEAGUES } from './espn.js';
+import { parseLegText } from './resolve.js';
+import { autoprice, repayout, flipSide } from './slip.js';
 import * as ST from './stats.js';
 import * as SV from './ui-stats.js';
 
@@ -321,7 +323,12 @@ function leagueViewHTML() {
     LG.standingsModeHTML(mode),
     mode === 'history'
       ? LG.historyHTML(L.weekHistory(lg, D.toLedgerRows(derived())).filter((w) => w.weekKey !== weekKey()))
-      : LG.standingsHTML(rows, state.me.uid, mode === 'all' ? 'all' : 'week'),
+      : mode === 'live'
+        ? leagueLiveHTML()
+        : LG.standingsHTML(rows, state.me.uid, mode === 'all' ? 'all' : 'week', {
+          openUid: state.ui.openMember || null,
+          cardsFor: memberBoardHTML,
+        }),
     mode === 'week' ? LG.inviteCardHTML(lg) : '',
     mode === 'week' ? LG.ownerPanelHTML(lg, state.me.uid) : '',
     state.ui.showForms ? LG.leagueFormsHTML(state.ui.formMode) : '',
@@ -363,6 +370,73 @@ function locksViewHTML(onlyLive) {
   return head
     + (ctx.errors.length ? `<div class="notice">${UI.esc(ctx.errors[0])}</div>` : '')
     + `<div class="cards">${list.map((d) => UI.lockCardHTML(d, { collapsed: folded.has(d.id) })).join('')}</div>`;
+}
+
+/**
+ * What one member of the league has running, under their standings row.
+ *
+ * Everyone's locks are already here: the league call returns every lock with
+ * its legs, and the slate is already loaded for all of them because the
+ * grader needs it. So this is a filter over work already done rather than
+ * anything new being fetched.
+ *
+ * Live ones first and closest to cashing at the top, which is the order you
+ * actually want when somebody is sweating a parlay. Settled ones are folded
+ * away, because the point of opening a name is to see what is still alive.
+ */
+function memberBoardHTML(row) {
+  const lg = league();
+  const mine = derived().filter((d) => d.uid === row.uid && (!lg || d.code === lg.code));
+  const live = mine.filter((d) => d.state === STATE.PENDING).sort(D.byCloseness);
+  const done = mine.filter((d) => d.state !== STATE.PENDING);
+
+  if (!mine.length) {
+    return `<p class="lb-empty">${UI.esc(row.name)} has not placed anything this week.</p>`;
+  }
+  if (!live.length) {
+    return `<p class="lb-empty">Nothing running. ${done.length} settled this week.</p>`;
+  }
+
+  return `<p class="lb-open-note">${live.length} running${done.length ? `, ${done.length} settled` : ''}</p>`
+    + `<div class="cards">${live.map((d) => UI.lockCardHTML(d, { collapsed: folded.has(d.id) })).join('')}</div>`;
+}
+
+/**
+ * Everything the whole league has running, in one list.
+ *
+ * Closest to cashing at the top, regardless of whose it is, with a name over
+ * each one. That ordering is the point: on a Sunday afternoon the question
+ * is not "what has Jamal got on", it is "what is about to happen", and the
+ * answer is usually somebody else's parlay one leg away.
+ */
+function leagueLiveHTML() {
+  const lg = league();
+  const names = new Map((lg.members || []).map((m) => [m.uid, m]));
+  const live = derived()
+    .filter((d) => d.code === lg.code && d.state === STATE.PENDING)
+    .sort(D.byCloseness);
+
+  const head = `<div class="section"><h2>Live locks</h2><p>${live.length
+    ? 'Everyone in the league, closest to cashing first.'
+    : `Nothing running in ${UI.esc(lg.name)} right now.`}</p></div>`;
+
+  if (!live.length) {
+    return head + `<div class="empty">${UI.crownSVG()}<div>When anyone places a lock it shows up here.</div></div>`;
+  }
+
+  return head + `<div class="cards">${live.map((d) => {
+    const who = names.get(d.uid);
+    const name = who ? who.name : 'Someone';
+    const mine = d.uid === state.me.uid;
+    return `<div class="owned">
+      <div class="owned-by ${mine ? 'me' : ''}">
+        <span class="avatar sm">${UI.esc(L.initialsOf(name))}</span>
+        <span class="owned-name">${UI.esc(mine ? 'You' : name)}</span>
+        ${d.live ? '<span class="owned-live">LIVE</span>' : ''}
+      </div>
+      ${UI.lockCardHTML(d, { collapsed: folded.has(d.id) })}
+    </div>`;
+  }).join('')}</div>`;
 }
 
 function statsViewHTML() {
@@ -597,6 +671,10 @@ root.addEventListener('click', async (e) => {
     draft = { ...draft, picks: [...draft.picks, { text: '', league: draft.picks[draft.picks.length - 1].league, odds: '' }] };
     return render();
   }
+  if (action === 'open-member') {
+    const uid = btn.dataset.uid;
+    return setUI({ openMember: state.ui.openMember === uid ? null : uid });
+  }
   if (action === 'sort-stats') {
     const { kind, key } = btn.dataset;
     const cur = (state.ui.statSort || {})[kind] || { key: 'stakedCents', dir: 'desc' };
@@ -608,6 +686,24 @@ root.addEventListener('click', async (e) => {
   if (action === 'fold-lock') {
     const id = btn.dataset.id;
     if (folded.has(id)) folded.delete(id); else folded.add(id);
+    return render();
+  }
+  if (action === 'set-side') {
+    readDraftInputs();
+    const i = Number(btn.dataset.i);
+    const want = btn.dataset.side;
+    draft = {
+      ...draft,
+      picks: draft.picks.map((p, j) => {
+        if (j !== i) return p;
+        const sport = (LEAGUES[p.league] || {}).sport || 'football';
+        const now = parseLegText(p.text, sport).side;
+        // Choosing the side it already has is not a correction, but it does
+        // settle the question, so the "we guessed this" mark comes off.
+        if (now === want) return { ...p, assumedSide: false };
+        return { ...p, text: flipSide(p.text), assumedSide: false };
+      }),
+    };
     return render();
   }
   if (action === 'del-leg') {

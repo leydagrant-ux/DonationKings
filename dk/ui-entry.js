@@ -65,7 +65,36 @@ function legRowHTML(pick, i, count, events) {
       ${count > 1 ? `<button class="entry-del" data-action="del-leg" data-i="${i}" aria-label="Remove leg">✕</button>` : ''}
     </div>
     ${r.kind !== 'empty' ? `<div class="entry-read ${r.kind}">${r.kind === 'ok' ? '' : '⚠ '}${esc(r.label)}</div>` : ''}
+    ${sideToggleHTML(pick, i)}
     ${quoteHTML(quote, pick)}
+  </div>`;
+}
+
+/**
+ * Which way a two-way pick went, as a pair of buttons.
+ *
+ * On a daily-fantasy slip the side is not written anywhere: it is whichever
+ * of two buttons is lit, and a transcription can miss which. Rather than
+ * making somebody retype the leg to correct a single word, the direction is
+ * a tap. A leg the app only guessed at is marked so it is obvious which ones
+ * are worth a second look before saving.
+ */
+function sideToggleHTML(pick, i) {
+  const text = String(pick.text || '').trim();
+  if (!text) return '';
+  const sport = (LEAGUES[pick.league] || {}).sport || 'football';
+  const p = parseLegText(text, sport);
+  // Only markets that genuinely have two sides. An alt line like "2+ Passing
+  // TDs" has no under, and a moneyline has no direction to flip.
+  const twoWay = (p.market === 'player_ou' || p.market === 'game_total' || p.market === 'team_total')
+    && !p.altLine && (p.side === 'over' || p.side === 'under');
+  if (!twoWay) return '';
+
+  const over = p.side === 'over';
+  return `<div class="side-toggle ${pick.assumedSide ? 'guessed' : ''}">
+    <button data-action="set-side" data-i="${i}" data-side="over" aria-pressed="${over}">More</button>
+    <button data-action="set-side" data-i="${i}" data-side="under" aria-pressed="${!over}">Less</button>
+    ${pick.assumedSide ? '<span class="side-note">not printed on the slip, check this</span>' : ''}
   </div>`;
 }
 

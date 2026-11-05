@@ -1419,6 +1419,72 @@ function testPrizePicks(t) {
   t.eq('each still in its own sport', draft.picks.map((p) => p.league),
     ['nfl', 'nfl', 'nfl', 'nba', 'nba', 'nba']);
 
+  t.section('prizepicks: the money labels do not fight each other');
+  // Three real slips pull in three directions, and "To Win" is both a payout
+  // label and how a book words a moneyline. Each of these broke one of the
+  // others at some point, so they are checked together.
+  const money = (lines) => {
+    const x = SL.parseSlip(lines.join('\n'));
+    return [x.stakeCents, x.payoutCents];
+  };
+  t.eq('money on one line', money(['Bought: $22.21 | To Pay: $72.00']), [2221, 7200]);
+  t.eq('money on the next line', money(['Total', '$22.21', 'Payout', '$72.00']), [2221, 7200]);
+  t.eq('a multiplier in between', money(['Entry fee', '$20', 'To Win 26.5x', '$530']), [2000, 53000]);
+  t.eq('"To Win" with its own figure', money(['Bought: $5.00', 'To Win $40.00']), [500, 4000]);
+  t.eq('no dollar signs at all', money(['Bought: 5.00', 'To Win 40.00']), [500, 4000]);
+  // The label appearing INSIDE a selection must not drag the stake in as
+  // the payout, which reads a $25 payout as $10 and looks fine on screen.
+  t.eq('a "To Win" moneyline leg does not poison it', money(['Chiefs To Win', '-150', 'Bought: $10.00', 'To Pay: $25.00']), [1000, 2500]);
+  // And a bare "To Win" under a team is the market, not a payout label.
+  t.eq('a bare "To Win" is a market, not a payout', money(['CLE Browns', 'To Win', 'Bought: $1.19']), [119, null]);
+  t.eq('and that leg still reads', SL.parseSlip(['CLE Browns', 'To Win', 'Bought: $1.19'].join('\n')).picks[0].text, 'CLE Browns To Win');
+
+  t.section('prizepicks: reading which button was lit');
+  // The model is asked to write only the SELECTED side, so a side word
+  // appearing after a pick is a fact off the screen, not a default.
+  const withSides = SL.parseSlip([
+    'NBA ORL vs PHX Thu 8:00pm', '',
+    'Anthony Black', '15 Points', 'More', '',
+    'Miles Bridges', '16.5 Points', 'Less', '',
+    'Entry fee', '$20', '', 'To Win 3x', '$60',
+  ].join('\n'));
+  t.eq('two picks', withSides.picks.length, 2);
+  t.eq('the lit side is used', withSides.picks.map((p) => R.parseLegText(p.text, 'basketball').side), ['over', 'under']);
+  t.ok('and neither is a guess any more', withSides.picks.every((p) => p.assumedSide === false));
+  t.ok('so the slip does not warn about it', !withSides.warnings.some((w) => /More or Less/i.test(w)));
+  // The side line must not be mistaken for a pick of its own.
+  t.ok('the side word is consumed, not left as a leg', withSides.picks.every((p) => !/^(more|less)$/i.test(p.text)));
+
+  t.section('prizepicks: a guess stays marked all the way to the form');
+  // One pick whose button the transcription saw, one it did not. The form
+  // has to be able to tell them apart, or a guess looks like a certainty.
+  const mixed = SL.parseSlip([
+    'NBA ORL vs PHX Thu 8:00pm', '',
+    'Anthony Black', '15 Points', 'Less', '',
+    'Miles Bridges', '16.5 Points', '',
+    'Entry fee', '$20', '', 'To Win 3x', '$60',
+  ].join('\n'));
+  t.eq('the one that was read is not a guess', mixed.picks[0].assumedSide, false);
+  t.eq('the one that was not, is', mixed.picks[1].assumedSide, true);
+  const mixedDraft = SL.slipToDraft(mixed, 'X');
+  t.eq('and that survives into the draft', mixedDraft.picks.map((p) => p.assumedSide), [false, true]);
+  t.eq('with the sides themselves intact', mixedDraft.picks.map((p) => R.parseLegText(p.text, 'basketball').side), ['under', 'over']);
+
+  t.section('prizepicks: turning a pick round');
+  t.eq('over becomes under', SL.flipSide('Stephen Curry Over 27.5 Points'), 'Stephen Curry Under 27.5 Points');
+  t.eq('and back again', SL.flipSide('Stephen Curry Under 27.5 Points'), 'Stephen Curry Over 27.5 Points');
+  t.eq('the book\'s own wording is kept', SL.flipSide('Curry MORE 27.5 Points'), 'Curry LESS 27.5 Points');
+  t.eq('in whatever case it was written', SL.flipSide('curry less 27.5 points'), 'curry more 27.5 points');
+  // An alt line has no other side to go to, so it is left exactly as it is.
+  t.eq('an alt line has no side to flip', SL.flipSide('Bhayshul Tuten 60+ Rushing Yards'), 'Bhayshul Tuten 60+ Rushing Yards');
+  t.eq('and neither has a moneyline', SL.flipSide('Packers ML'), 'Packers ML');
+  // Only the direction changes: the player, the number and the stat are
+  // already right and must not be disturbed by correcting the side.
+  const flipped = R.parseLegText(SL.flipSide('Stephen Curry Over 27.5 Points'), 'basketball');
+  t.eq('the player survives', flipped.subjectRaw, 'Stephen Curry');
+  t.eq('the line survives', flipped.line, 27.5);
+  t.eq('the stat survives', flipped.stat, 'points');
+
   t.section('prizepicks: the line-movement arrow is decoration');
   // The app draws an arrow beside a number that has drifted. Read into the
   // number it would change the line being graded.
@@ -1427,6 +1493,61 @@ function testPrizePicks(t) {
     'Entry fee', '$5', '', 'To Win 3x', '$15',
   ].join('\n'));
   t.eq('the arrow does not reach the line', R.parseLegText(moved.picks[0].text, 'basketball').line, 16.5);
+}
+
+// ---------------------------------------------------------------------------
+// The same three things, whatever the slip looks like
+// ---------------------------------------------------------------------------
+
+/**
+ * Every slip, from every app, has to yield the same three things: the legs,
+ * what was bought, and what it pays. Nothing else is required to save a lock
+ * and nothing else is allowed to block one.
+ *
+ * This is the rule the app kept breaking from different directions. It
+ * demanded a price on every leg, which no prop slip prints. It read the
+ * payout off a multiplier. It threw away half the picks on a layout it had
+ * not seen. So the rule is asserted here against all three real slips at
+ * once rather than trusted to hold.
+ */
+function testEverySlipGivesTheSameThree(t) {
+  const cases = [
+    ['DraftKings share card', PROP_SHARE_CARD, 3, 2221, 7200],
+    ['DraftKings bet card', PROP_BET_CARD, 3, 2221, 7200],
+    ['PrizePicks entry', PRIZEPICKS_CARD, 6, 2000, 53000],
+  ];
+
+  for (const [name, text, legs, bought, pays] of cases) {
+    t.section(`all slips: ${name}`);
+    const slip = SL.parseSlip(text);
+    const draft = SL.slipToDraft(slip, 'DEGEN7');
+
+    t.eq('every leg is read', draft.picks.length, legs);
+    t.eq('what it cost', draft.stakeCents, bought);
+    t.eq('what it pays', draft.payoutCents, pays);
+
+    // Every leg has to name something the grader can actually follow.
+    const understood = draft.picks.every((p) => {
+      const sp = (p.league === 'nba' || p.league === 'cbb') ? 'basketball' : 'football';
+      const q = R.parseLegText(p.text, sp);
+      return !!q.market && !!q.subjectRaw;
+    });
+    t.ok('and every leg names a market and a subject', understood);
+
+    // The three things are enough on their own: no leg prices anywhere, and
+    // the lock still settles for exactly what the slip promised.
+    const stored = {
+      id: 'L1', code: 'DEGEN7', uid: 'me',
+      stakeCompCents: draft.stakeCents,
+      payoutCents: draft.payoutCents,
+      boostPct: 0,
+      picks: draft.picks.map((p) => ({ text: p.text, league: p.league, odds: null })),
+      overrides: Object.fromEntries(draft.picks.map((_, i) => [i, G.STATE.WON])),
+    };
+    const won = DV.deriveLock(stored, { events: [], snapshots: [] });
+    t.eq('with no leg prices at all, a win pays the slip', won.returnCents, pays);
+    t.eq('and the profit is the difference', won.returnCents - won.stakeCompCents, pays - bought);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1908,6 +2029,7 @@ export function runAll(fixtures) {
   testSlip(t);
   testPropSlip(t);
   testPrizePicks(t);
+  testEverySlipGivesTheSameThree(t);
   testSettledStillYours(t);
   testFoldedPips(t);
   testPromisedPayout(t);

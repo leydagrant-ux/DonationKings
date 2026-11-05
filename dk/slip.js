@@ -33,18 +33,56 @@ const STAKE_LABELS = [
   /\bentry\s*fee\b\s*:?\s*\$?\s*([\d.,]+)/i, // PrizePicks
 ];
 
-/* The payout, with one trap in it.
+/* The payout. Three real slips pull in three different directions here.
  *
- * PrizePicks writes "To Win 26.5x" above "$530": a multiplier and then the
- * money. Taking the first number after the label reads the payout as $26.50
- * and would settle a $530 win at a twentieth of it. So the dollar sign is
- * looked for first, across the short gap a multiplier occupies, and only if
- * there is no dollar figure at all is a bare number accepted, and then never
- * one that is itself a multiplier. */
+ *   "Payout" / "$72.00"      the money is on the NEXT line
+ *   "To Win 26.5x" / "$530"  a multiplier first, money on the next line
+ *   "CLE Browns" / "To Win"  not a payout at all: that is the MARKET
+ *
+ * So every pattern is anchored to a line break or a separator, never found
+ * mid-sentence, because otherwise the label inside the selection "Chiefs To
+ * Win" matches and the search then takes the next dollar figure it can
+ * reach, which is the stake. And "to win" is split out from the rest: it
+ * only reads as a payout when a figure sits with it, so a bare "To Win"
+ * under a team name stays the moneyline it is.
+ *
+ * The multiplier is the other trap. Taking the first number after the label
+ * reads "26.5x / $530" as a payout of $26.50 and would settle a $530 win at
+ * a twentieth of it, so a dollar figure is always preferred and a bare
+ * number is never accepted when it is itself a multiplier. */
+const SURE = String.raw`total\s*payout|paid|payout|to\s*pay|to\s*return|potential\s*(?:win|payout|return)|returns?`;
 const PAYOUT_LABELS = [
-  /\b(?:total\s*payout|paid|payout|to\s*pay|to\s*win|to\s*return|potential\s*(?:win|payout|return)|returns?)\b[^$]{0,24}?\$\s*([\d.,]+)/i,
-  /\b(?:total\s*payout|paid|payout|to\s*pay|to\s*win|to\s*return|potential\s*(?:win|payout|return)|returns?)\b\s*:?\s*([\d.,]+)(?!\s*x\b)/i,
+  // An unambiguous label, with the money on the same line or the next one.
+  new RegExp(String.raw`(?:^|\n|\|)\s*(?:${SURE})\b[^$]{0,24}?\$\s*([\d.,]+)`, 'i'),
+  // "To Win $530", money on the same line. It may not cross a line break:
+  // that is what separates it from a bare "To Win" above a stake.
+  /(?:^|\n|\|)\s*to\s*win\b[^$\n]{0,24}?\$\s*([\d.,]+)/i,
+  // "To Win 26.5x" then "$530". The figure on the label line is what says
+  // this is a payout line rather than a market.
+  /(?:^|\n|\|)\s*to\s*win\b[^\n]*\d[^\n]*\n\s*\$\s*([\d.,]+)/i,
+  // No dollar sign anywhere. The lookahead has to reach past the rest of
+  // the number, or "26.5x" matches on "26." with a 5 left over.
+  new RegExp(String.raw`(?:^|\n|\|)\s*(?:${SURE}|to\s*win)\b\s*:?\s*([\d.,]+)(?![\d.,]*\s*x\b)`, 'i'),
 ];
+
+/* A line that is only a money label, with at most a bare figure or a
+ * multiplier after it: "Entry fee", "Payout", "To Win 26.5x".
+ *
+ * It has to be anchored at the start. "To Win" is also how a book words a
+ * moneyline, so an unanchored match would delete "Chiefs To Win", which is
+ * a real selection. */
+const MONEY_LABEL_LINE = /^(?:total\s*payout|payout|to\s*pay|to\s*return|returns?|paid|bought|wager(?:ed)?|stake|entry\s*fee|total)\b\s*:?\s*[\d.,$x%]*\s*$/i;
+
+/* "To Win" is the one label that is also a market. A book writes a moneyline
+ * as the team on one line and "To Win" under it, and a real slip in the
+ * suite does exactly that. So it only counts as a payout label when a figure
+ * follows it; bare, it stays what it is to the bettor, which is the market. */
+const AMBIGUOUS_LABEL_LINE = /^to\s*win\b\s*:?\s*[\d.,$x%]+\s*$/i;
+
+/* A line that is nothing but the chosen side of a two-way pick. The model is
+ * told to write only the selected one, so a line like this is the record of
+ * which button was lit. */
+const SIDE_WORD = /^\s*[▲▼↑↓]?\s*(more|less|over|under|higher|lower)\b\s*[▲▼↑↓]?\s*$/i;
 
 /** Lines that are chrome, not content. Dropping them cuts false leg matches. */
 const NOISE = [
@@ -147,7 +185,13 @@ export function parseSlip(raw) {
   const lines = all.map((l) => l.replace(/\s+/g, ' ').trim());
 
   const BARE_ODDS = /^\s*[(\[]?([+-]\d{3,5})[)\]]?\s*$/;
-  const isMoneyLine = (l) => STAKE_LABELS.some((re) => re.test(l)) || PAYOUT_LABELS.some((re) => re.test(l));
+  // A money line is one carrying an amount, OR a bare label with nothing but
+  // a figure or a multiplier on it. Without the second case "To Win 3x" has
+  // no amount to match, falls through, and "to win" parses as a moneyline,
+  // so the payout label itself ends up saved as a selection.
+  const isMoneyLine = (l) => MONEY_LABEL_LINE.test(String(l || '').trim())
+    || AMBIGUOUS_LABEL_LINE.test(String(l || '').trim())
+    || STAKE_LABELS.some((re) => re.test(l)) || PAYOUT_LABELS.some((re) => re.test(l));
 
   /** Split a line into its selection text and any trailing price. */
   const splitOdds = (l) => {
@@ -282,12 +326,19 @@ export function parseSlip(raw) {
       const j = nextContent(i + 1);
       const ls = lineAndStat(lines[j], current);
       if (ls && !/\d/.test(body)) {
-        const text = `${body} Over ${ls.line} ${ls.stat}`;
+        // Which way the pick went, if the transcription managed to see which
+        // button was lit. Only the selected one is written, so finding one
+        // here is a fact off the screen rather than a default.
+        const k = nextContent(j + 1);
+        const said = SIDE_WORD.exec(lines[k] || '');
+        const side = said ? (/^(?:more|over|higher|↑)/i.test(said[1]) ? 'Over' : 'Under') : 'Over';
+
+        const text = `${body} ${side} ${ls.line} ${ls.stat}`;
         const p = parseLegText(text, (LEAGUES[current] || {}).sport || sport);
         if (p.market && p.subjectRaw && p.stat) {
-          picks.push({ text, league: current, odds, assumedSide: true });
-          assumedSide = true;
-          i = j;
+          picks.push({ text, league: current, odds, assumedSide: !said });
+          if (!said) assumedSide = true;
+          i = said ? k : j;
           continue;
         }
       }
@@ -500,7 +551,16 @@ export function slipToDraft(slip, code) {
     payoutAuto: payout === null,
     boostPct: slip.boostPct || 0,
     picks: slip.picks.length
-      ? slip.picks.map((p) => ({ text: p.text, league: p.league, odds: p.odds === null ? '' : String(p.odds) }))
+      ? slip.picks.map((p) => ({
+        text: p.text,
+        league: p.league,
+        odds: p.odds === null ? '' : String(p.odds),
+        // Carried through, so the form can mark the legs whose direction
+        // nobody actually read off the slip. Dropping it here meant the
+        // warning stopped at the confirmation screen and the form showed a
+        // guess looking exactly like a certainty.
+        assumedSide: !!p.assumedSide,
+      }))
       : [{ text: '', league: slip.league || 'nfl', odds: '' }],
   };
 }
@@ -567,4 +627,38 @@ export function repayout(draft) {
   const want = totalReturnCents(draft.stakeCents, parlayDecimal(odds));
   if (want === draft.payoutCents) return draft;
   return { ...draft, payoutCents: want, payoutAuto: true };
+}
+
+/**
+ * Turn a leg's over into an under, or back again.
+ *
+ * The side is the one thing on a daily-fantasy slip that is not written in
+ * words: it lives in whichever of two buttons is lit, and a transcription
+ * can miss it. So the form carries a toggle, and this is what it does. It
+ * rewrites the wording only, leaving the player, the number and the stat
+ * exactly as they were, because those were read correctly and should not be
+ * disturbed by correcting the direction.
+ */
+export function flipSide(text) {
+  const s = String(text || '');
+  const SWAP = {
+    over: 'Under', under: 'Over',
+    more: 'Less', less: 'More',
+    higher: 'Lower', lower: 'Higher',
+    o: 'U', u: 'O',
+  };
+  let done = false;
+  const out = s.replace(/\b(over|under|more|less|higher|lower)\b/i, (m) => {
+    done = true;
+    const to = SWAP[m.toLowerCase()];
+    // Keep the shape of what was there: OVER becomes UNDER, not Under.
+    if (m === m.toUpperCase()) return to.toUpperCase();
+    if (m === m.toLowerCase()) return to.toLowerCase();
+    return to;
+  });
+  if (done) return out;
+
+  // An alt line has no side word at all: "2+ Passing TDs" means at least
+  // two. There is no under to flip it to, so it is left alone.
+  return s;
 }
