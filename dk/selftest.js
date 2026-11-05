@@ -1326,6 +1326,110 @@ function testPropSlip(t) {
 }
 
 // ---------------------------------------------------------------------------
+// A daily-fantasy slip, which is a different shape again
+// ---------------------------------------------------------------------------
+
+// Exactly what the vision model returned for a real PrizePicks entry, fence
+// and blank lines included. Six picks across three games and two sports, the
+// higher/lower choice printed nowhere, and a multiplier sitting between the
+// payout label and the money.
+const PRIZEPICKS_CARD = [
+  '```',
+  '14:06', '',
+  'PRIZEPICKS', '',
+  '6-Pick EARLY PAYOUT', '',
+  'NFL JAC vs BAL Thu 7:15pm', '',
+  'Brenton Strange', '36.5 Rec Yards', '',
+  'Jakobi Meyers', '38.5 Rec Yards', '',
+  'Trevor Lawrence', '233.5 Pass Yards', '',
+  'NBA ORL vs PHX Thu 8:00pm', '',
+  'Anthony Black', '15 Points', '',
+  'Miles Bridges', '16.5 Points', '',
+  'NBA MIA vs GSW Thu 9:00pm', '',
+  'Stephen Curry', '27.5 Points', '',
+  'Win contest or 6 of 6 picks', '',
+  'Flex Play', 'Power Play ✓', '',
+  'Entry fee', '$20', '',
+  'To Win 26.5x', '$530', '',
+  'Not enough balance. Tap below to deposit.', '',
+  'Balance: Players $0 Teams $0', '',
+  'Deposit Funds',
+  '```',
+].join('\n');
+
+function testPrizePicks(t) {
+  const s = SL.parseSlip(PRIZEPICKS_CARD);
+
+  t.section('prizepicks: the money');
+  t.eq('the entry fee is the stake', s.stakeCents, 2000);
+  // The trap: "To Win 26.5x" sits above "$530". Taking the first number
+  // after the label settles a $530 win at $26.50.
+  t.eq('the payout is the money, not the multiplier', s.payoutCents, 53000);
+  t.ok('which is emphatically not 26.5', s.payoutCents !== 2650);
+
+  t.section('prizepicks: six picks across two sports');
+  t.eq('all six are read', s.picks.length, 6);
+  t.eq('and the slip agrees', s.declaredLegs, 6);
+  t.eq('the picks, in order', s.picks.map((p) => p.text), [
+    'Brenton Strange Over 36.5 Rec Yards',
+    'Jakobi Meyers Over 38.5 Rec Yards',
+    'Trevor Lawrence Over 233.5 Pass Yards',
+    'Anthony Black Over 15 Points',
+    'Miles Bridges Over 16.5 Points',
+    'Stephen Curry Over 27.5 Points',
+  ]);
+  // Each section header sets the sport for the picks under it. One league
+  // for the whole slip would send the basketball picks looking for a
+  // quarterback and never find them.
+  t.eq('each pick carries its own league', s.picks.map((p) => p.league),
+    ['nfl', 'nfl', 'nfl', 'nba', 'nba', 'nba']);
+
+  t.section('prizepicks: what the grader will look for');
+  const want = s.picks.map((p) => {
+    const sp = p.league === 'nba' ? 'basketball' : 'football';
+    const q = R.parseLegText(p.text, sp);
+    return [q.subjectRaw, q.stat, q.side, q.line];
+  });
+  t.eq('player, stat, side and line for every pick', want, [
+    ['Brenton Strange', 'recYards', 'over', 36.5],
+    ['Jakobi Meyers', 'recYards', 'over', 38.5],
+    ['Trevor Lawrence', 'passYards', 'over', 233.5],
+    ['Anthony Black', 'points', 'over', 15],
+    ['Miles Bridges', 'points', 'over', 16.5],
+    ['Stephen Curry', 'points', 'over', 27.5],
+  ]);
+  // A whole number is a real line here, not a typo for one with a half.
+  t.eq('a whole-number line survives', R.parseLegText(s.picks[3].text, 'basketball').line, 15);
+
+  t.section('prizepicks: the side is a guess, and says so');
+  t.ok('every pick is marked as assumed', s.picks.every((p) => p.assumedSide === true));
+  t.ok('and the slip warns about it', s.warnings.some((w) => /More or Less/i.test(w)));
+
+  t.section('prizepicks: a Flex entry is refused, not guessed');
+  // Flex pays on part of the card, on a scale the slip does not state.
+  const flex = SL.parseSlip(PRIZEPICKS_CARD.replace('Power Play ✓', 'Power Play').replace('Flex Play', 'Flex Play ✓'));
+  t.ok('a flex entry is called out', flex.warnings.some((w) => /Flex entry/i.test(w)));
+  t.ok('and a power play entry is not', !s.warnings.some((w) => /Flex entry/i.test(w)));
+
+  t.section('prizepicks: it reaches the form intact');
+  const draft = SL.slipToDraft(s, 'DEGEN7');
+  t.eq('with the stake', draft.stakeCents, 2000);
+  t.eq('and the payout', draft.payoutCents, 53000);
+  t.eq('and all six legs', draft.picks.length, 6);
+  t.eq('each still in its own sport', draft.picks.map((p) => p.league),
+    ['nfl', 'nfl', 'nfl', 'nba', 'nba', 'nba']);
+
+  t.section('prizepicks: the line-movement arrow is decoration');
+  // The app draws an arrow beside a number that has drifted. Read into the
+  // number it would change the line being graded.
+  const moved = SL.parseSlip([
+    'NBA ORL vs PHX Thu 8:00pm', '', 'Miles Bridges', '▼ 16.5 Points', '',
+    'Entry fee', '$5', '', 'To Win 3x', '$15',
+  ].join('\n'));
+  t.eq('the arrow does not reach the line', R.parseLegText(moved.picks[0].text, 'basketball').line, 16.5);
+}
+
+// ---------------------------------------------------------------------------
 // A settled lock is still your lock
 // ---------------------------------------------------------------------------
 
@@ -1803,6 +1907,7 @@ export function runAll(fixtures) {
   testStore(t, snaps);
   testSlip(t);
   testPropSlip(t);
+  testPrizePicks(t);
   testSettledStillYours(t);
   testFoldedPips(t);
   testPromisedPayout(t);

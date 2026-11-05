@@ -30,9 +30,20 @@ const STAKE_LABELS = [
   // A share card labels the stake "Total". The dollar sign is required, so
   // this can never swallow a game total: "Total Points Over 44.5" has none.
   /\btotal\b\s*:?\s*\$\s*([\d.,]+)/i,
+  /\bentry\s*fee\b\s*:?\s*\$?\s*([\d.,]+)/i, // PrizePicks
 ];
+
+/* The payout, with one trap in it.
+ *
+ * PrizePicks writes "To Win 26.5x" above "$530": a multiplier and then the
+ * money. Taking the first number after the label reads the payout as $26.50
+ * and would settle a $530 win at a twentieth of it. So the dollar sign is
+ * looked for first, across the short gap a multiplier occupies, and only if
+ * there is no dollar figure at all is a bare number accepted, and then never
+ * one that is itself a multiplier. */
 const PAYOUT_LABELS = [
-  /\b(?:total\s*payout|paid|payout|to\s*pay|to\s*win|to\s*return|potential\s*(?:win|payout|return)|returns?)\b\s*:?\s*\$?\s*([\d.,]+)/i,
+  /\b(?:total\s*payout|paid|payout|to\s*pay|to\s*win|to\s*return|potential\s*(?:win|payout|return)|returns?)\b[^$]{0,24}?\$\s*([\d.,]+)/i,
+  /\b(?:total\s*payout|paid|payout|to\s*pay|to\s*win|to\s*return|potential\s*(?:win|payout|return)|returns?)\b\s*:?\s*([\d.,]+)(?!\s*x\b)/i,
 ];
 
 /** Lines that are chrome, not content. Dropping them cuts false leg matches. */
@@ -183,6 +194,38 @@ export function parseSlip(raw) {
     return !parseLegText(s, sport).market;
   };
 
+  /**
+   * A section header: "NFL JAC vs BAL Thu 7:15pm".
+   *
+   * These group the picks below them, and on a daily-fantasy slip they are
+   * the ONLY statement of which sport each pick belongs to. A six-pick entry
+   * can be half football and half basketball, and reading one league for the
+   * whole slip sends the basketball picks looking for a quarterback.
+   */
+  const sectionLeague = (l) => {
+    const m = /^(nfl|nba|cbb|cfb|ncaaf|ncaab|college\s*football|college\s*basketball)\b/i
+      .exec(String(l || '').trim());
+    if (!m) return null;
+    const k = m[1].toLowerCase().replace(/\s+/g, '');
+    if (k === 'ncaaf' || k === 'collegefootball') return 'cfb';
+    if (k === 'ncaab' || k === 'collegebasketball') return 'cbb';
+    return LEAGUES[k] ? k : null;
+  };
+
+  /**
+   * A line that is a number and a stat, with no player: "36.5 Rec Yards",
+   * "15 Points". The player is on the line above.
+   *
+   * The arrow is a line-movement marker the app draws next to a number that
+   * has drifted; it is decoration and must not end up in the number.
+   */
+  const lineAndStat = (l, lg) => {
+    const m = /^[▲▼↑↓]?\s*(\d+(?:\.\d+)?)\s+(.+)$/.exec(String(l || '').trim());
+    if (!m) return null;
+    const sp = (LEAGUES[lg] || {}).sport || sport;
+    return matchStat(m[2], sp) ? { line: m[1], stat: m[2] } : null;
+  };
+
   /** Chrome, or a matchup line: either way it is not part of a selection. */
   const skippable = (l) => !l || isGameLabel(l) || (isNoise(l) && !isThreshold(l));
 
@@ -213,12 +256,42 @@ export function parseSlip(raw) {
     return null;
   };
 
+  // The league in force for the picks below, which a section header changes
+  // as the slip goes down. Starts as the whole-slip guess, which is all a
+  // single-sport slip ever needs.
+  let current = league;
+  let assumedSide = false;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+
+    const sec = sectionLeague(line);
+    if (sec) { current = sec; continue; }
+
     if (skippable(line) || isMoneyLine(line)) continue;
 
     let { body, odds } = splitOdds(line);
     let consumed = 1;
+
+    // The daily-fantasy layout: a player's name, then the number and the
+    // stat on the line under it. There is no "over" or "under" printed
+    // anywhere, because the choice lives in a pair of buttons the
+    // transcription cannot see, so it is read as the higher side and the
+    // slip is flagged for a human to check.
+    if (!parseLegText(body, sport).stat) {
+      const j = nextContent(i + 1);
+      const ls = lineAndStat(lines[j], current);
+      if (ls && !/\d/.test(body)) {
+        const text = `${body} Over ${ls.line} ${ls.stat}`;
+        const p = parseLegText(text, (LEAGUES[current] || {}).sport || sport);
+        if (p.market && p.subjectRaw && p.stat) {
+          picks.push({ text, league: current, odds, assumedSide: true });
+          assumedSide = true;
+          i = j;
+          continue;
+        }
+      }
+    }
 
     // A threshold headline takes its player and stat from the line below,
     // which may be a matchup line away.
@@ -228,7 +301,7 @@ export function parseSlip(raw) {
       const n = target ? splitOdds(target) : null;
       const composed = n ? composeThreshold(body, n.body) : null;
       if (composed) {
-        picks.push({ text: composed, league, odds: odds !== null ? odds : n.odds });
+        picks.push({ text: composed, league: current, odds: odds !== null ? odds : n.odds });
         i = j;
         continue;
       }
@@ -280,7 +353,7 @@ export function parseSlip(raw) {
       if (m) odds = parseAmerican(m[1]);
     }
 
-    picks.push({ text: body, league, odds });
+    picks.push({ text: body, league: current, odds });
     i += consumed - 1;
   }
 
@@ -297,6 +370,21 @@ export function parseSlip(raw) {
     warnings.push('No payout and no leg prices, so this cannot be settled. Add what it pays if it hits.');
   }
   if (payoutCents === null && picks.length) warnings.push('Could not find the payout.');
+
+  // The higher/lower choice on a daily-fantasy slip lives in a pair of
+  // buttons, not in any text, so a transcription cannot see which way each
+  // pick went. Reading them all as the higher side is a guess, and a guess
+  // about money has to be said out loud rather than buried.
+  if (assumedSide) {
+    warnings.push('This slip does not print More or Less in words, so every pick was read as More. Change any that were Less before saving.');
+  }
+
+  // Flex pays out on some of the picks landing rather than all of them, on a
+  // sliding scale the slip does not state. Graded all-or-nothing it would
+  // call a paying entry a loss, so it is refused rather than guessed at.
+  if (/flex\s*play[^\n]*[✓✔]|[✓✔][^\n]*flex\s*play/i.test(text)) {
+    warnings.push('This is a Flex entry, which pays on part of the card. Only an all-or-nothing entry is graded here, so enter what it actually paid when it settles.');
+  }
 
   return {
     stakeCents,
