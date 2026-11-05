@@ -334,6 +334,59 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 .legs { margin-top: 18px; display: flex; flex-direction: column; gap: 16px; }
 
+/* ---- the folded card ------------------------------------------------- */
+
+.legs-folded {
+  margin-top: 16px; display: flex; align-items: center; gap: 11px; flex-wrap: wrap;
+}
+.pips { display: inline-flex; gap: 6px; }
+.folded-note { font-size: 12.5px; color: var(--dim); }
+
+/* One pip per leg. The glow is what makes the row readable at arm's length:
+ * flat dots at this size all look alike on a black background. */
+.pip {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--line); flex: none;
+}
+.pip.won  { background: var(--green); box-shadow: 0 0 7px 1px rgba(83, 211, 55, .65); }
+.pip.live { background: var(--gold);  box-shadow: 0 0 7px 1px rgba(240, 180, 41, .65); }
+.pip.lost { background: var(--red);   box-shadow: 0 0 7px 1px rgba(240, 86, 91, .55); }
+.pip.push { background: var(--dim); }
+.pip.review { background: var(--purple); box-shadow: 0 0 7px 1px rgba(124, 92, 255, .5); }
+
+/* A leg still running is the one you are actually watching, so its pip is
+ * the only thing on the card that moves. */
+@media (prefers-reduced-motion: no-preference) {
+  .pip.live { animation: pip-pulse 1.9s ease-in-out infinite; }
+}
+@keyframes pip-pulse {
+  0%, 100% { box-shadow: 0 0 7px 1px rgba(240, 180, 41, .65); }
+  50%      { box-shadow: 0 0 11px 3px rgba(240, 180, 41, .85); }
+}
+
+/* The parlay's own colour, so a screen of folded cards sorts itself out
+ * before you read a word of it. Only when folded: expanded, the legs say
+ * all this in full and a glowing border would just be noise. */
+/* The ring is an inset shadow, not a border: the base card has no border, and
+ * adding one only when folded would shift every card by a pixel as it opens
+ * and closes. */
+.card.folded { transition: box-shadow .2s ease; }
+.card.folded.glow-won {
+  box-shadow: inset 0 0 0 1px rgba(83, 211, 55, .55), 0 0 22px -6px rgba(83, 211, 55, .5);
+}
+.card.folded.glow-live {
+  box-shadow: inset 0 0 0 1px rgba(240, 180, 41, .5), 0 0 22px -6px rgba(240, 180, 41, .45);
+}
+.card.folded.glow-lost {
+  box-shadow: inset 0 0 0 1px rgba(240, 86, 91, .35), 0 0 20px -8px rgba(240, 86, 91, .35);
+}
+
+/* A won card already wears the brass frame, so it takes the outer glow only.
+ * A green ring inside a gold one is two treatments fighting. */
+.card.is-won.folded.glow-won {
+  box-shadow: 0 0 24px -6px rgba(83, 211, 55, .45);
+}
+
 /* An outlined pill on the right, the way the book draws it. */
 .card-actions { justify-content: flex-end; }
 .card-actions .fold {

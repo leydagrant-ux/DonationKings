@@ -25,7 +25,7 @@ import * as ST from './store.js';
 import * as DV from './derive.js';
 import * as SL from './slip.js';
 import * as STS from './stats.js';
-import { lockTitle as UI_lockTitle } from './ui.js';
+import { lockTitle as UI_lockTitle, pipState as UI_pipState } from './ui.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -1185,6 +1185,54 @@ function testSlip(t) {
 }
 
 // ---------------------------------------------------------------------------
+// The folded card's pips
+// ---------------------------------------------------------------------------
+
+/**
+ * A pip is the only thing a folded lock says about a leg, so it has to be
+ * right about the one question worth asking: is this still alive.
+ *
+ * Clinched and dead are the cases that matter. A leg that cannot lose any
+ * more has hit whatever the clock says, and one that cannot win is gone.
+ * Showing either as merely "in progress" would paint a dead parlay as live.
+ */
+function testFoldedPips(t) {
+  const leg = (verdict, snapState) => ({
+    verdict,
+    snapshot: snapState ? { state: snapState } : null,
+  });
+
+  t.section('folded card: what a pip says');
+  t.eq('a won leg is green', UI_pipState(leg({ state: G.STATE.WON })), 'won');
+  t.eq('a lost leg is red', UI_pipState(leg({ state: G.STATE.LOST })), 'lost');
+  t.eq('a leg whose game is running is amber', UI_pipState(leg({ state: G.STATE.PENDING }, 'in')), 'live');
+  t.eq('a leg whose game has not started is dim', UI_pipState(leg({ state: G.STATE.PENDING }, null)), 'open');
+  t.eq('a finished game still pending is not live', UI_pipState(leg({ state: G.STATE.PENDING }, 'post')), 'open');
+
+  t.section('folded card: clinched and dead');
+  // The whole point: these are mid-game, so the state is still PENDING.
+  t.eq(
+    'a clinched leg reads as hit even while the game runs',
+    UI_pipState(leg({ state: G.STATE.PENDING, clinched: true }, 'in')),
+    'won',
+  );
+  t.eq(
+    'and a dead one reads as missed rather than live',
+    UI_pipState(leg({ state: G.STATE.PENDING, dead: true }, 'in')),
+    'lost',
+  );
+  // Settled always wins over the in-progress flag.
+  t.eq('a settled loss stays a loss', UI_pipState(leg({ state: G.STATE.LOST }, 'in')), 'lost');
+
+  t.section('folded card: the rest');
+  t.eq('a push is neither', UI_pipState(leg({ state: G.STATE.PUSH })), 'push');
+  t.eq('a void is shown the same way', UI_pipState(leg({ state: G.STATE.VOID })), 'push');
+  t.eq('one needing a look is its own colour', UI_pipState(leg({ state: G.STATE.REVIEW })), 'review');
+  t.eq('a leg with no verdict does not throw', UI_pipState({}), 'open');
+  t.eq('and neither does nothing at all', UI_pipState(null), 'open');
+}
+
+// ---------------------------------------------------------------------------
 // Settling at the payout the slip promised
 // ---------------------------------------------------------------------------
 
@@ -1541,6 +1589,7 @@ export function runAll(fixtures) {
   testLeague(t);
   testStore(t, snaps);
   testSlip(t);
+  testFoldedPips(t);
   testPromisedPayout(t);
   testStats(t);
   testPricing(t, fixtures);

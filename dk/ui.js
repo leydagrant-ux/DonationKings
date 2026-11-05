@@ -282,6 +282,63 @@ const fmtPlaced = (ts) => {
  *   returnCents, oddsAmerican, boostPct, placedAt, eligible, correlated, live
  * }
  */
+/**
+ * How one leg is standing right now, for the folded card's pips.
+ *
+ * `clinched` and `dead` matter as much as the settled states. A leg that
+ * cannot lose any more has effectively hit, whatever the clock says, and one
+ * that cannot win is gone. Treating those as merely "in progress" would show
+ * a parlay as alive when it is already dead, which is the one thing a glance
+ * at this row must never get wrong.
+ */
+export function pipState(entry) {
+  const v = (entry && entry.verdict) || {};
+  if (v.state === STATE.WON || v.clinched) return 'won';
+  if (v.state === STATE.LOST || v.dead) return 'lost';
+  if (v.state === STATE.PUSH || v.state === STATE.VOID) return 'push';
+  if (v.state === STATE.REVIEW) return 'review';
+  if (entry && entry.snapshot && entry.snapshot.state === 'in') return 'live';
+  return 'open';
+}
+
+/**
+ * The folded card's one line: a pip per leg, lit by what that leg is doing,
+ * then a count in words.
+ *
+ * Folding should put the detail away, not the state. Six parlays on a Sunday
+ * are unreadable fully expanded, and this row still answers the only
+ * question that matters at a glance: which of these are still alive.
+ */
+function legPipsHTML(lock) {
+  const legs = lock.legs || [];
+  if (!legs.length) return `<span class="folded-note">No leg detail on this one</span>`;
+
+  const n = { won: 0, lost: 0, live: 0, open: 0, push: 0, review: 0 };
+  const pips = legs.map((l) => {
+    const k = pipState(l);
+    n[k]++;
+    return `<span class="pip ${k}"></span>`;
+  }).join('');
+
+  const bits = [];
+  if (n.won) bits.push(`${n.won} hit`);
+  if (n.lost) bits.push(`${n.lost} missed`);
+  if (n.live) bits.push(`${n.live} live`);
+  if (n.push) bits.push(`${n.push} void`);
+  if (n.review) bits.push(`${n.review} to check`);
+  if (n.open) bits.push(`${n.open} to go`);
+  return `<span class="pips">${pips}</span><span class="folded-note">${esc(bits.join(' · '))}</span>`;
+}
+
+/** The colour the whole folded card carries: what the lock is doing overall. */
+function lockGlow(lock) {
+  const st = lock.roll.state;
+  if (st === STATE.WON) return 'won';
+  if (st === STATE.LOST) return 'lost';
+  if (lock.live) return 'live';
+  return 'open';
+}
+
 export function lockCardHTML(lock, { collapsed = false } = {}) {
   const st = lock.roll.state;
   const won = st === STATE.WON;
@@ -293,7 +350,7 @@ export function lockCardHTML(lock, { collapsed = false } = {}) {
   const names = lock.legs.map((l) => describeLeg(l.leg, l.snapshot).name).filter(Boolean);
   const pct = lock.impliedPct;
 
-  return `<article class="card ${won ? 'is-won' : ''}">
+  return `<article class="card ${won ? 'is-won' : ''} ${collapsed ? `folded glow-${lockGlow(lock)}` : ''}">
     ${won ? `<div class="crownline">
       <span class="mark">${crownSVG()}DONATION<span style="color:var(--green)">KINGS</span></span>
       <span class="tagline">LONG LIVE THE <b>KING</b></span>
@@ -324,11 +381,14 @@ export function lockCardHTML(lock, { collapsed = false } = {}) {
       ${lock.capped ? `<span class="badge capped">Stake capped to bankroll</span>` : ''}
     </div>` : ''}
 
-    <!-- Folded, the legs and the box scores go away entirely. The names
-         line under the title is what carries the lock at a glance, which is
-         exactly how the book does it: nothing stands in for the legs, they
-         are simply not there until asked for. -->
-    ${collapsed ? '' : `<div class="legs">${legsHTML(lock.legs, lock.id)}</div>`}
+    <!-- Folded, the legs and their box scores go away and a pip each takes
+         their place: lit green for one that has hit, amber while its game is
+         running, red once it is gone. The card carries the same colour for
+         the parlay as a whole, so a screen of folded locks reads at arm's
+         length without opening any of them. -->
+    ${collapsed
+      ? `<div class="legs-folded">${legPipsHTML(lock)}</div>`
+      : `<div class="legs">${legsHTML(lock.legs, lock.id)}</div>`}
 
     <div class="card-foot">
       <div class="card-actions">
