@@ -1264,6 +1264,21 @@ function testPropSlip(t) {
     t.ok('nor is anything else', s.warnings.length === 0);
   }
 
+  t.section('prop slip: as the vision model actually returns it');
+  // The live model puts a blank line between every line it reads. Captured
+  // from a real run against the deployed worker, so the suite is checking
+  // the shape the app really gets rather than a tidied-up version of it.
+  const doubleSpaced = PROP_SHARE_CARD.split('\n').join('\n\n');
+  const live = SL.parseSlip(doubleSpaced);
+  t.eq('the blank lines change nothing', live.picks.map((p) => p.text), [
+    'Bhayshul Tuten Anytime TD Scorer',
+    'Bhayshul Tuten 60+ Rushing Yards',
+    'Derrick Henry 40+ Rushing Yards',
+  ]);
+  t.eq('and the money still reads', live.stakeCents, 2221);
+  t.eq('both figures', live.payoutCents, 7200);
+  t.ok('with nothing to warn about', live.warnings.length === 0);
+
   t.section('prop slip: the matchup line is context, not a selection');
   // Read as a selection it became the subject of the leg below it, and the
   // player's name was thrown away.

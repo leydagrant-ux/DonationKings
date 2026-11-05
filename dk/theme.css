@@ -813,10 +813,31 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .scan-found b { color: var(--text); font-weight: 800; }
 .scan-legs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .scan-legs li {
-  display: flex; justify-content: space-between; gap: 12px; align-items: baseline;
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: baseline;
   background: var(--surface-3); border-radius: 9px; padding: 10px 12px; font-size: 14px;
 }
+.scan-legs .sl-text { font-weight: 600; }
+/* What the grader made of the leg, under the leg itself. If it cannot tell
+ * what you meant it says so here, while the text is still editable. */
+.scan-legs .sl-read { grid-column: 1 / -1; font-size: 12px; color: var(--green); }
+.scan-legs .sl-read.bad { color: var(--gold); }
 .scan-legs .odds { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* The two figures that settle the lock, read off the slip. Shown large and
+ * first, because a wrong leg can be corrected later and a wrong payout pays
+ * the wrong person. */
+.scan-money { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sm-cell {
+  padding: 12px 14px; border-radius: var(--r-btn);
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+}
+.sm-label {
+  display: block; font-size: 10px; font-weight: 700; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--mute);
+}
+.sm-val { display: block; font-size: 21px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.sm-cell.missing { border-color: var(--gold-deep); }
+.sm-cell.missing .sm-val { font-size: 15px; color: var(--gold); }
 
 /* One-tap grading for a leg the engine refused to call. */
 .leg-fix { display: flex; gap: 7px; margin-top: 8px; flex-wrap: wrap; }

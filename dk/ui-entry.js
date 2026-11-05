@@ -136,12 +136,31 @@ export function scanConfirmHTML({ transcript, preview, slip, model }) {
       <textarea id="scan-text" rows="10" spellcheck="false">${esc(transcript)}</textarea></label>
     <p class="field-note">Fix anything wrong, then continue. The legs below update as you edit.</p>
 
-    <div class="scan-found">
-      <b>${found}</b> ${found === 1 ? 'selection' : 'selections'} found${slip.stakeCents ? `, stake ${money(slip.stakeCents)}` : ''}
-      ${slip.declaredLegs ? ` &middot; the slip says ${slip.declaredLegs}` : ''}
+    <!-- The two money figures first and largest, because they are what
+         settles the lock. A wrong leg can be fixed later; a wrong payout
+         pays the wrong person. -->
+    <div class="scan-money">
+      <div class="sm-cell ${slip.stakeCents ? '' : 'missing'}">
+        <span class="sm-label">Bought</span>
+        <span class="sm-val">${slip.stakeCents ? money(slip.stakeCents) : 'not found'}</span>
+      </div>
+      <div class="sm-cell ${slip.payoutCents ? '' : 'missing'}">
+        <span class="sm-label">To Pay</span>
+        <span class="sm-val">${slip.payoutCents ? money(slip.payoutCents) : 'not found'}</span>
+      </div>
     </div>
-    ${slip.picks.length ? `<ul class="scan-legs">${slip.picks.map((p) => `
-      <li><span>${esc(p.text)}</span><span class="odds">${p.odds === null ? 'no price' : americanStr(p.odds)}</span></li>`).join('')}</ul>` : ''}
+
+    <div class="scan-found">
+      <b>${found}</b> ${found === 1 ? 'leg' : 'legs'} read${slip.declaredLegs ? ` &middot; the slip says ${slip.declaredLegs}` : ''}
+    </div>
+    ${slip.picks.length ? `<ul class="scan-legs">${slip.picks.map((p) => {
+    const r = readback(p);
+    return `<li>
+        <span class="sl-text">${esc(p.text)}</span>
+        <span class="sl-read ${r.kind}">${r.kind === 'ok' ? esc(r.label) : '⚠ not recognized yet'}</span>
+        ${p.odds === null ? '' : `<span class="odds">${americanStr(p.odds)}</span>`}
+      </li>`;
+  }).join('')}</ul>` : ''}
     ${slip.warnings.map((w) => `<div class="notice warn">${esc(w)}</div>`).join('')}
 
     <button class="bigbtn" data-action="scan-continue">Continue to the form</button>
