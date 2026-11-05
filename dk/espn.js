@@ -126,6 +126,46 @@ export const DERIVED = {
   stocks: ['steals', 'blocks'],
 };
 
+/**
+ * A fantasy score, which is a WEIGHTED sum rather than a plain one.
+ *
+ * No feed publishes this number. ESPN carries a `fantasyStatus`, but that is
+ * an injury designation; there is no fantasy points field anywhere in the
+ * summary or the core API, and CBS has no public JSON at all. It does not
+ * need to be fetched though: it is arithmetic over stats already in the box
+ * score, so it is computed here and then behaves like any other stat.
+ *
+ * These are the ordinary full-PPR weights, which is what the daily-fantasy
+ * apps use. They will not always agree with a book to the decimal, and a
+ * disagreement near the line decides a bet, so `grade.js` refuses to settle
+ * a fantasy leg that lands close to its number and sends it to a person
+ * instead. That is the honest way to use a figure that was reconstructed
+ * rather than published.
+ */
+export const WEIGHTED = {
+  fantasyScore: {
+    football: {
+      passYards: 0.04,
+      passTd: 4,
+      interceptionsThrown: -1,
+      rushYards: 0.1,
+      rushTd: 6,
+      receptions: 1,
+      recYards: 0.1,
+      recTd: 6,
+      fumblesLost: -2,
+    },
+    basketball: {
+      points: 1,
+      rebounds: 1.2,
+      assists: 1.5,
+      steals: 3,
+      blocks: 3,
+      turnovers: -1,
+    },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -439,6 +479,22 @@ export function snapshotFromSummary(raw, league) {
         if (v !== null && v !== undefined) sum = (sum || 0) + v;
       }
       if (sum !== null) p.stats[key] = sum;
+    }
+
+    // Weighted sums, for the scores a book computes rather than reports.
+    // Only for somebody who actually did something: an empty stat line
+    // would otherwise come out as a confident zero.
+    for (const [key, bySport] of Object.entries(WEIGHTED)) {
+      const weights = bySport[cfg.sport];
+      if (!weights) continue;
+      let total = null;
+      for (const [part, w] of Object.entries(weights)) {
+        const v = p.stats[part];
+        if (v !== null && v !== undefined) total = (total || 0) + v * w;
+      }
+      // Two decimals, because 0.04 a yard produces long tails that would
+      // otherwise show up as 18.400000000000002 on the card.
+      if (total !== null) p.stats[key] = Math.round(total * 100) / 100;
     }
   }
 

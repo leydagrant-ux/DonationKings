@@ -1413,14 +1413,23 @@ function testPrizePicksLive(t) {
   t.ok('not the one it replaced', henry.line !== 68.5);
   t.eq('and the stat is still right', henry.stat, 'rushYards');
 
-  t.section('live card: a stat no box score reports');
-  // A fantasy score is a formula the book computes, not a figure ESPN
-  // publishes. Dropping the leg would quietly make a six-pick entry look
-  // like a five-pick one, so it is kept, shown, and marked for a person.
-  t.ok('the leg is kept rather than dropped', s.picks[0].text.includes('Fantasy Score'));
-  t.ok('and marked as one to grade by hand', s.picks[0].ungradeable === true);
-  t.ok('with a warning that says so', s.warnings.some((w) => /fantasy score/i.test(w)));
-  t.ok('the gradeable ones are not marked', s.picks.slice(1).every((p) => !p.ungradeable));
+  t.section('live card: a stat nobody publishes');
+  // No feed carries a fantasy score. ESPN has a `fantasyStatus`, but that is
+  // an injury designation, and the core API has no points field either. It
+  // is arithmetic over the box score, so it is worked out rather than looked
+  // up, and the leg grades like any other.
+  t.ok('the leg is kept', s.picks[0].text.includes('Fantasy Score'));
+  t.eq('and it resolves to a real stat', R.parseLegText(s.picks[0].text, 'football').stat, 'fantasyScore');
+  t.ok('so it is not left for a human', !s.picks[0].ungradeable);
+  // A stat the app genuinely cannot place is still kept, because dropping it
+  // turns a six-pick entry into a five-pick one and the money then describes
+  // something that was never bet.
+  const odd = SL.parseSlip([
+    'NFL', 'JAC vs BAL', 'Trevor Lawrence', 'JAC • QB • #16', '18.5', 'Zorbleflux Rating', '$25 to win $925',
+  ].join('\n'));
+  t.eq('an unknown stat keeps its leg', odd.picks.length, 1);
+  t.ok('marked for a person', odd.picks[0].ungradeable === true);
+  t.ok('and the slip says so', odd.warnings.some((w) => /by hand/i.test(w)));
 
   t.section('live card: combined stats');
   t.eq('PRA is a stat the box score can answer', R.parseLegText(s.picks[3].text, 'basketball').stat, 'pra');
@@ -1569,6 +1578,98 @@ function testPrizePicks(t) {
     'Entry fee', '$5', '', 'To Win 3x', '$15',
   ].join('\n'));
   t.eq('the arrow does not reach the line', R.parseLegText(moved.picks[0].text, 'basketball').line, 16.5);
+}
+
+// ---------------------------------------------------------------------------
+// A fantasy score, worked out rather than looked up
+// ---------------------------------------------------------------------------
+
+/**
+ * Nobody publishes this number.
+ *
+ * ESPN's summary carries a `fantasyStatus`, but that is an injury
+ * designation; there is no points field there or in the core API, and CBS
+ * has no public JSON. It does not need fetching though: it is arithmetic
+ * over stats the box score already gives, so it is computed and then
+ * behaves like any other stat.
+ *
+ * The weights are the ordinary full-PPR ones. They will not always agree
+ * with a book to the decimal, which is exactly why a result landing near
+ * the line is sent to a person instead of being settled.
+ */
+function testFantasyScore(t, snaps) {
+  const { nfl, nba } = snaps;
+
+  t.section('fantasy: worked out from a real box score');
+  const love = [...nfl.players.values()].find((p) => /Love/.test(p.display));
+  t.ok('a quarterback has one', typeof love.stats.fantasyScore === 'number');
+  // Checked against the formula rather than against a remembered number.
+  const expectLove = Math.round((
+    (love.stats.passYards || 0) * 0.04
+    + (love.stats.passTd || 0) * 4
+    + (love.stats.interceptionsThrown || 0) * -1
+    + (love.stats.rushYards || 0) * 0.1
+    + (love.stats.rushTd || 0) * 6
+    + (love.stats.receptions || 0) * 1
+    + (love.stats.recYards || 0) * 0.1
+    + (love.stats.recTd || 0) * 6
+    + (love.stats.fumblesLost || 0) * -2
+  ) * 100) / 100;
+  t.eq('and it is the weighted sum of his line', love.stats.fantasyScore, expectLove);
+
+  const hub = [...nfl.players.values()].find((p) => /Hubbard/.test(p.display));
+  t.eq('a running back too', hub.stats.fantasyScore, Math.round((
+    (hub.stats.rushYards || 0) * 0.1 + (hub.stats.rushTd || 0) * 6
+    + (hub.stats.receptions || 0) * 1 + (hub.stats.recYards || 0) * 0.1
+    + (hub.stats.recTd || 0) * 6
+  ) * 100) / 100);
+
+  t.section('fantasy: basketball uses its own weights');
+  const sga = [...nba.players.values()].find((p) => /Gilgeous/.test(p.display));
+  t.eq('points, boards, dimes, stocks and turnovers', sga.stats.fantasyScore, Math.round((
+    sga.stats.points + sga.stats.rebounds * 1.2 + sga.stats.assists * 1.5
+    + sga.stats.steals * 3 + sga.stats.blocks * 3 + sga.stats.turnovers * -1
+  ) * 100) / 100);
+  // A basketball score is not a football one: the same stats must not be
+  // run through the wrong table.
+  t.ok('and a footballer is not scored as a basketballer', love.stats.fantasyScore !== love.stats.points);
+
+  t.section('fantasy: the long tail is rounded off');
+  // 0.04 a passing yard produces 18.400000000000002 without this.
+  t.ok(
+    'every score is at most two decimals',
+    [...nfl.players.values()].every((p) => p.stats.fantasyScore === undefined
+      || Math.abs(p.stats.fantasyScore * 100 - Math.round(p.stats.fantasyScore * 100)) < 1e-9),
+  );
+
+  t.section('fantasy: a player who did nothing has no score');
+  // An empty stat line must not come out as a confident zero: absent is not
+  // the same as nought, and the app leans on that difference everywhere.
+  const empty = { id: 'x', stats: {} };
+  t.ok('absent, not zero', empty.stats.fantasyScore === undefined);
+
+  t.section('fantasy: close calls are not settled here');
+  const leg = (line) => ({
+    market: 'player_ou', side: 'over', line, stat: 'fantasyScore',
+    athleteId: love.id, subjectRaw: love.display,
+  });
+  const score = love.stats.fantasyScore;
+  // Real lines come in halves, and anything else is refused outright.
+  const half = (x) => Math.round(x * 2) / 2;
+  // Clear of the line either way: settle it.
+  t.eq('a clear win settles', G.gradeLeg(leg(half(score) - 6), nfl).state, G.STATE.WON);
+  t.eq('a clear loss settles', G.gradeLeg(leg(half(score) + 6), nfl).state, G.STATE.LOST);
+  // Within a fumble's worth of the line: ask, because the book's weights
+  // differ slightly and the feed does not report fumbles lost at all.
+  const near = G.gradeLeg(leg(half(score - 0.5)), nfl);
+  t.eq('a result beside the line is sent to a person', near.state, G.STATE.REVIEW);
+  t.ok('and says why', /worked out here, not published/i.test(near.reason || ''));
+  // The same closeness on a stat the feed DOES publish settles normally.
+  const yards = {
+    market: 'player_ou', side: 'over', line: (love.stats.passYards || 0) - 0.5,
+    stat: 'passYards', athleteId: love.id, subjectRaw: love.display,
+  };
+  t.eq('a published stat still settles when close', G.gradeLeg(yards, nfl).state, G.STATE.WON);
 }
 
 // ---------------------------------------------------------------------------
@@ -2107,6 +2208,7 @@ export function runAll(fixtures) {
   testPropSlip(t);
   testPrizePicks(t);
   testPrizePicksLive(t);
+  testFantasyScore(t, snaps);
   testEverySlipGivesTheSameThree(t);
   testSettledStillYours(t);
   testFoldedPips(t);

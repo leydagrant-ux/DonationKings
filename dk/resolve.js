@@ -34,12 +34,20 @@ export const AUTO_GRADE_MIN = C.LAST_ONLY;
 // "touchdowns" and "points + rebounds + assists" before "points".
 
 const FOOTBALL_STAT_PHRASES = [
+  // A fantasy score is computed from the box score rather than reported by
+  // it. It goes FIRST so "Fantasy Points" cannot be read as plain points.
+  [/\b(fantasy\s*(score|points?)|fpts)\b/, 'fantasyScore'],
+
   [/\b(pass(ing)?\s*\+\s*rush(ing)?\s*yards?|pass\s*&\s*rush\s*yards?)\b/, 'passRushYards'],
   [/\b(rush(ing)?\s*\+\s*rec(eiving)?\s*yards?|rush\s*&\s*rec\s*yards?|scrimmage\s*yards?)\b/, 'scrimmageYards'],
   [/\bpass(ing)?\s*(yards?|yds?)\b/, 'passYards'],
   [/\bpass(ing)?\s*(touchdowns?|tds?)\b/, 'passTd'],
   [/\bpass(ing)?\s*(completions?|comp)\b/, 'completions'],
   [/\bpass(ing)?\s*attempts?\b/, 'passAttempts'],
+  // The bare forms, which is how a daily-fantasy app labels them. These sit
+  // after the "passing ..." versions so the longer wording still wins.
+  [/\b(completions?|comp)\b/, 'completions'],
+  [/\battempts?\b/, 'passAttempts'],
   [/\b(interceptions?\s*thrown|int(erception)?s?\s*thrown)\b/, 'interceptionsThrown'],
   [/\brush(ing)?\s*(yards?|yds?)\b/, 'rushYards'],
   [/\brush(ing)?\s*(touchdowns?|tds?)\b/, 'rushTd'],
@@ -60,6 +68,10 @@ const FOOTBALL_STAT_PHRASES = [
 ];
 
 const BASKETBALL_STAT_PHRASES = [
+  // A fantasy score is computed from the box score rather than reported by
+  // it. It goes FIRST so "Fantasy Points" cannot be read as plain points.
+  [/\b(fantasy\s*(score|points?)|fpts)\b/, 'fantasyScore'],
+
   [/\b(points?\s*\+\s*rebounds?\s*\+\s*assists?|pts?\s*\+\s*reb\s*\+\s*ast|p\s*\+\s*r\s*\+\s*a|pra)\b/, 'pra'],
   [/\b(points?\s*\+\s*rebounds?|pts?\s*\+\s*reb)\b/, 'pointsRebounds'],
   [/\b(points?\s*\+\s*assists?|pts?\s*\+\s*ast)\b/, 'pointsAssists'],

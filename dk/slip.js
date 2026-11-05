@@ -85,7 +85,15 @@ const AMBIGUOUS_LABEL_LINE = /^to\s*win\b\s*:?\s*[\d.,$x%]+\s*$/i;
 /* Stats a book offers that no box score reports. A fantasy score is a
  * weighted formula the app computes itself, not a number ESPN publishes, so
  * a leg on one can be tracked and shown but never graded automatically. */
-const UNGRADEABLE_STAT = /^(?:fantasy\s*(?:score|points?)|fpts|pp\s*score)$/i;
+/* A stat phrase the app does not recognize, in a place where a stat clearly
+ * belongs: a short run of words sitting under a player and a number.
+ *
+ * Keeping the leg matters more than classifying it. Dropped, a six-pick
+ * entry silently becomes a five-pick one and the money no longer describes
+ * what was bet. Kept, it shows up, says it cannot be followed, and can be
+ * graded by hand, which is what the review path is for. Fantasy scores used
+ * to land here; they are computed from the box score now. */
+const STAT_SHAPED = /^[A-Za-z][A-Za-z.+/' -]{1,30}$/;
 
 const SIDE_WORD = /^\s*[▲▼↑↓]?\s*(more|less|over|under|higher|lower)\b\s*[▲▼↑↓]?\s*$/i;
 
@@ -398,7 +406,7 @@ export function parseSlip(raw) {
         // A stat the box score cannot answer is still a leg that was bet.
         // Dropping it silently loses a pick and quietly makes a six-leg
         // parlay look like a five-leg one, so it is kept and marked.
-        if (known || UNGRADEABLE_STAT.test(statLine)) {
+        if (known || STAT_SHAPED.test(statLine)) {
           const k = nextContent(j + 1);
           const said = SIDE_WORD.exec(lines[k] || '');
           const side = said ? (/^(?:more|over|higher|↑)/i.test(said[1]) ? 'Over' : 'Under') : 'Over';
@@ -520,7 +528,7 @@ export function parseSlip(raw) {
   // pick went. Reading them all as the higher side is a guess, and a guess
   // about money has to be said out loud rather than buried.
   if (ungradeable) {
-    warnings.push('One of these is a fantasy score, which no box score reports. It is saved and shown, but it has to be graded by hand when the game ends.');
+    warnings.push('One of these uses a stat this app cannot follow in a box score. It is saved and shown, but it has to be graded by hand when the game ends.');
   }
   if (assumedSide) {
     warnings.push('This slip does not print More or Less in words, so every pick was read as More. Change any that were Less before saving.');

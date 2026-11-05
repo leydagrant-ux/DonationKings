@@ -234,6 +234,11 @@ function gradeTotal(leg, snapshot, out, final, teamAbbr) {
   return { ...out, state: settleOverUnder(current, leg.line, leg.side) };
 }
 
+/* How close to the line a fantasy score has to be before a person is asked.
+ * Two points, because that is what a single fumble lost is worth and the
+ * feed does not report those at all. */
+const FANTASY_MARGIN = 2;
+
 function gradePlayer(leg, snapshot, out, final, sport) {
   const binary = leg.stat === 'anytimeTd' || leg.market === 'player_yes_no';
   out.render = binary ? RENDER.BINARY : RENDER.BAR;
@@ -279,6 +284,24 @@ function gradePlayer(leg, snapshot, out, final, sport) {
   }
 
   if (!final) return out;
+
+  // A reconstructed number does not get to settle a close call.
+  //
+  // A fantasy score is not published by anybody: it is computed here from
+  // the box score with the ordinary full-PPR weights. A book's own weights
+  // differ in small ways, and one fumble lost, which the feed does not
+  // report at all, moves it two points. None of that matters when the
+  // result is clear, and all of it matters when it lands beside the line,
+  // where a tenth of a point decides the money. So the clear ones settle
+  // and the close ones go to a person.
+  if (leg.stat === 'fantasyScore' && Math.abs(value - line) <= FANTASY_MARGIN) {
+    return {
+      ...out,
+      state: STATE.REVIEW,
+      reason: `${who} finished on ${value} against a line of ${line}. A fantasy score is worked out here, not published, so a result this close has to be confirmed against your app.`,
+    };
+  }
+
   return { ...out, state: settleOverUnder(value, line, side) };
 }
 
