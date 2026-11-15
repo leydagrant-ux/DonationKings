@@ -80,7 +80,7 @@ function toStored(lock, legs, overrides) {
  * as a row of question marks before kickoff, so the leg as written stands in
  * until there is something better to say.
  */
-function legOut(verdict, pick) {
+function legOut(verdict, pick, leg) {
   const written = String((pick && pick.text) || '').trim();
   return {
     state: verdict.state,
@@ -92,6 +92,18 @@ function legOut(verdict, pick) {
     overshoot: !!verdict.overshoot,
     render: verdict.render || 'bar',
     label: verdict.label || written || '?',
+
+    /* The resolved parts, so a display can write its own line instead of
+     * parsing the prose label. `label` bakes the numbers in ("Jahmyr Gibbs
+     * 13 of 69.5"), which reads as a duplicate next to a progress column and
+     * cannot tell a rushing prop from a receiving one. These can.
+     *
+     * All four may be null: a leg the resolver could not read still grades
+     * by hand and still has to draw. */
+    player: (leg && leg.subjectRaw) ? String(leg.subjectRaw).trim() : null,
+    stat: (leg && leg.stat) || null,
+    market: (leg && leg.market) || null,
+    side: (leg && leg.side) || null,
   };
 }
 
@@ -198,7 +210,7 @@ export async function overlayParlays(env, opts = {}) {
       out.errors.push(`could not grade ${s.id}`);
       continue;
     }
-    const legs = (derived.legs || []).map((l) => legOut(l.verdict, s.picks[l.index]));
+    const legs = (derived.legs || []).map((l) => legOut(l.verdict, s.picks[l.index], l.leg));
     out.parlays.push({
       id: s.id,
       name: nameOf(lock, legs.length),
