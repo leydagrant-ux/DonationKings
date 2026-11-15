@@ -36,7 +36,27 @@ crons = ["*/5 * * * *"]
 [ai]
 binding = "AI"
 
-# No secrets needed. If Workers AI turns out not to read slips accurately
+# The TV overlay route, GET /overlay/parlays. Read only, one person's open
+# locks, its own shared token, and no Firebase: the client is a Python script
+# on the house wifi (see ../../FantasyOverlay). Two secrets, neither of them
+# ever in this file or in this repo:
+#
+#   OVERLAY_TOKEN   a long random string, shared with that one machine. The
+#                   route refuses to serve if it is shorter than 32 chars, so
+#                   a half-finished deploy fails closed rather than open.
+#   OVERLAY_UID     whose locks to serve. A secret rather than a request
+#                   parameter on purpose: there is then no way to point the
+#                   token at anybody else's bets.
+#
+# Set them without an interactive prompt (note --config: see the warning at
+# the bottom of this file):
+#
+#   "$TOKEN" | npx wrangler secret put OVERLAY_TOKEN --config wrangler.toml
+#   "$UID"   | npx wrangler secret put OVERLAY_UID   --config wrangler.toml
+#
+# Optional: OVERLAY_MAX_SUMMARIES caps box scores per poll. Default 6.
+
+# No other secrets needed. If Workers AI turns out not to read slips accurately
 # enough, Gemini Flash is the fallback plan and would add one:
 #   npx wrangler secret put GEMINI_API_KEY
 
@@ -45,7 +65,17 @@ binding = "AI"
 #   npx wrangler d1 create donationkings          # paste database_id above
 #   npx wrangler d1 execute donationkings --local  --file=./schema.sql
 #   npx wrangler d1 execute donationkings --remote --file=./schema.sql
-#   npx wrangler deploy
+#   npx wrangler deploy --config wrangler.toml
 #
 # Local development, which runs the real Worker against a local D1:
-#   npx wrangler dev --local
+#   npx wrangler dev --local --config wrangler.toml
+
+# A TRAP, found the hard way. There is a stray `wrangler.jsonc` two levels up
+# (in the Claude folder) that names a different worker. Wrangler walks up and
+# picks it up IN PREFERENCE to this file, even when run from inside this
+# directory, so a plain `npx wrangler deploy` here deploys the wrong worker.
+# Always pass the config explicitly:
+#
+#   npx wrangler deploy --config wrangler.toml
+#
+# Same for `wrangler secret put` and everything else.

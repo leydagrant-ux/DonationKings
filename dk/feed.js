@@ -163,13 +163,20 @@ export async function fetchSummary(league, eventId) {
  * over a hundred games at roughly 650KB each, and a phone should not try to
  * pull the lot. Games already pointed at by a leg are never capped away.
  *
+ * `startedOnly` skips box scores for games that have not kicked off. Off by
+ * default, because the app wants the fixture for a leg that is still to come;
+ * the TV overlay turns it on, since it polls constantly and a pre-game
+ * summary cannot grade anything.
+ *
  * The returned context carries `scope`: lock id -> the set of event ids that
  * lock is allowed to be graded against, which is the games on ITS days. That
  * is what stops a week nine leg binding to week ten's fixture between the
  * same two teams; `derive.js` applies it. A lock with no entry in `scope` is
  * unrestricted, so a caller that does not build one behaves as before.
  */
-export async function loadContext(locks, { maxSummaries = 12, dates, maxBoards = 8 } = {}) {
+export async function loadContext(locks, {
+  maxSummaries = 12, dates, maxBoards = 8, startedOnly = false,
+} = {}) {
   const open = (locks || []).filter((l) => (l.picks || []).length);
   const leagues = [...new Set(open.flatMap((l) => (l.picks || []).map((p) => p.league)).filter(Boolean))];
   const errors = [];
@@ -276,8 +283,16 @@ export async function loadContext(locks, { maxSummaries = 12, dates, maxBoards =
     }
   }
 
-  // Games a leg named outright are never dropped, however many there are.
-  const named = [...wanted.entries()];
+  /* Games a leg named outright are never dropped, however many there are.
+   *
+   * `startedOnly` drops the ones that have not kicked off, which is what the
+   * TV overlay wants: it polls every 25 seconds and a box score for a game
+   * that starts tomorrow is 650KB of parsing that cannot grade anything. The
+   * app itself leaves it off, because it shows the fixture and the clock for
+   * a leg whose game is still to come. */
+  const startedById = new Map(events.map((e) => [e.eventId, e.state === 'in' || e.state === 'post']));
+  const named = [...wanted.entries()]
+    .filter(([id]) => !startedOnly || startedById.get(id));
 
   // Pass two: other started games, so a player-only lock can resolve. These
   // are what the cap applies to. Live games first: a finished game can be

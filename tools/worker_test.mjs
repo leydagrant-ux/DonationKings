@@ -10,7 +10,10 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
-import { route, validateLockBody, isCode, isWeekKey, isCents, isAmerican, verifyFirebaseToken } from '../worker/index.js';
+import worker, { route, validateLockBody, isCode, isWeekKey, isCents, isAmerican,
+  verifyFirebaseToken, overlayTokenOk } from '../worker/index.js';
+import { overlayParlays, clearOverlayCache } from '../worker/overlay.js';
+import { clearCache as clearFeedCache } from '../dk/feed.js';
 import { runGrader, LIMITS } from '../worker/grader.js';
 import { dateKeyOf } from '../dk/feed.js';
 
@@ -553,6 +556,220 @@ sec('week 9: the grader asks for the lock\'s own day, not today\'s board');
     eq('a current lock needs no dated request', asked.filter((u) => u.includes('dates=')).length, 0);
   } finally {
     globalThis.fetch = realFetch;
+  }
+}
+
+sec('overlay: the token gate');
+{
+  const good = 'x'.repeat(43);
+  ok('the right token passes', overlayTokenOk(good, good));
+  ok('a wrong token of the same length fails', !overlayTokenOk('y'.repeat(43), good));
+  ok('a wrong length fails', !overlayTokenOk('x'.repeat(42), good));
+  ok('nothing presented fails', !overlayTokenOk('', good));
+  // Fail closed. An unset or stubby secret must not be matchable at all,
+  // otherwise a half-finished deploy serves the locks to anyone who guesses
+  // a short string.
+  ok('a configured token under 32 chars is refused outright',
+    !overlayTokenOk('short', 'short'));
+  ok('an unset secret is refused', !overlayTokenOk('anything', ''));
+  ok('a non-string is refused', !overlayTokenOk(undefined, good));
+}
+
+sec('overlay: the read-only route, end to end through fetch()');
+{
+  const fx = (n) => readFileSync(new URL(`../fixtures/${n}`, import.meta.url), 'utf8');
+  const realFetch = globalThis.fetch;
+  const TOKEN = 'tv-' + 'a'.repeat(40);
+
+  // Two people in one league. Only the configured uid's locks may ever come
+  // back, so the other one's lock is what proves it.
+  const g = fresh();
+  await signUp(g, 'u-tv', 'Grant');
+  await signUp(g, 'u-other', 'Ashtin');
+  const lg = (await call(g, 'u-tv', 'POST', '/v1/leagues', { name: 'TV', startBankrollCents: 10000 })).body.league.code;
+  await call(g, 'u-other', 'POST', '/v1/leagues/join', { code: lg });
+
+  const mine = (await call(g, 'u-tv', 'POST', '/v1/locks', {
+    code: lg, weekKey: '2026-W45', stakeCents: 2500, payoutCents: 64000,
+    picks: [
+      { text: 'Packers ML', league: 'nfl', odds: -165 },
+      { text: 'Jordan Love 1+ passing TDs', league: 'nfl', odds: -200 },
+    ],
+  })).body.id;
+  const theirs = (await call(g, 'u-other', 'POST', '/v1/locks', {
+    code: lg, weekKey: '2026-W45', stakeCents: 500,
+    picks: [{ text: 'Bears ML', league: 'nfl', odds: 120 }],
+  })).body.id;
+  // A settled lock of his own: nothing left to watch, so it must not take
+  // screen space either.
+  const done = (await call(g, 'u-tv', 'POST', '/v1/locks', {
+    code: lg, weekKey: '2026-W45', stakeCents: 100,
+    picks: [{ text: 'Vikings ML', league: 'nfl', odds: 110 }],
+  })).body.id;
+  await call(g, 'u-tv', 'POST', `/v1/locks/${done}/settle`, { state: 'won', returnCents: 210 });
+
+  const env2 = {
+    DB: g.DB,
+    ALLOWED_ORIGINS: 'https://leydagrant-ux.github.io',
+    FIREBASE_PROJECT_ID: 'donationkings',
+    OVERLAY_TOKEN: TOKEN,
+    OVERLAY_UID: 'u-tv',
+  };
+
+  const hit = async (headers = {}, method = 'GET', qs = '') => {
+    clearOverlayCache();
+    clearFeedCache();
+    const res = await worker.fetch(
+      new Request(`https://api.example.com/overlay/parlays${qs}`, { method, headers }), env2);
+    let body = null;
+    try { body = JSON.parse(await res.text()); } catch { body = null; }
+    return { status: res.status, body };
+  };
+  const asToken = (t) => ({ Authorization: `Bearer ${t}` });
+
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    asked.push(u);
+    const body = u.includes('/football/nfl/scoreboard') ? fx('nfl_scoreboard.json')
+      : u.includes('/football/nfl/summary?event=401873023') ? fx('nfl_final_car_gb.json')
+        : null;
+    if (!body) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => JSON.parse(body) };
+  };
+
+  try {
+    eq('no token is a 401', (await hit()).status, 401);
+    eq('a junk token is a 401', (await hit(asToken('nope'))).status, 401);
+    eq('a junk token the right length is still a 401',
+      (await hit(asToken('z'.repeat(TOKEN.length)))).status, 401);
+    // A Firebase ID token is not an overlay token and must not be accepted
+    // here either: this route's gate is its own.
+    eq('the route never falls through to Firebase',
+      (await hit(asToken('eyJhbGciOiJSUzI1NiJ9.e30.x'))).status, 401);
+
+    const good = await hit(asToken(TOKEN));
+    eq('the right token is a 200', good.status, 200);
+    ok('and the answer is JSON with a parlays array',
+      good.body && Array.isArray(good.body.parlays), JSON.stringify(good.body));
+
+    const ids = good.body.parlays.map((p) => p.id);
+    ok('his open lock is there', ids.includes(mine), ids.join(','));
+    ok('the other player\'s lock is NOT', !ids.includes(theirs), ids.join(','));
+    ok('and neither is his settled one', !ids.includes(done), ids.join(','));
+
+    const p = good.body.parlays.find((x) => x.id === mine);
+    eq('the stake comes through in cents', p.stake_cents, 2500);
+    eq('and the payout the slip promised', p.payout_cents, 64000);
+    ok('a parlay has a name', typeof p.name === 'string' && p.name.length > 0, p.name);
+    eq('every leg is present', p.legs.length, 2);
+
+    // THE CONTRACT. parlay.py reads exactly these keys and nothing else, so
+    // a rename on either side has to break a test rather than a TV.
+    const want = ['state', 'clinched', 'dead', 'current', 'needed', 'pct', 'overshoot', 'render', 'label'];
+    for (const k of want) {
+      ok(`a leg carries ${k}`, Object.prototype.hasOwnProperty.call(p.legs[0], k),
+        JSON.stringify(p.legs[0]));
+    }
+    ok('state is a grade.js state',
+      ['pending', 'won', 'lost', 'push', 'void', 'needs_review'].includes(p.legs[0].state),
+      p.legs[0].state);
+    ok('clinched and dead are booleans',
+      typeof p.legs[0].clinched === 'boolean' && typeof p.legs[0].dead === 'boolean');
+    ok('render is one grade.js uses', ['bar', 'binary', 'score'].includes(p.legs[0].render),
+      p.legs[0].render);
+    ok('no leg label is empty, so the board never shows a row of nothing',
+      p.legs.every((l) => typeof l.label === 'string' && l.label.length > 0),
+      JSON.stringify(p.legs.map((l) => l.label)));
+
+    // Green Bay won in this fixture, so the moneyline is graded off the real
+    // box score rather than sitting pending.
+    eq('the Packers leg graded off the real box score', p.legs[0].state, 'won');
+
+    // The whole point of the route: it reads. Nothing it does may write.
+    const before = ['locks', 'ledger', 'legs', 'leg_overrides', 'audit', 'grade_queue']
+      .map((t) => g.raw.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c);
+    const after1 = g.raw.prepare('SELECT COUNT(*) c FROM locks WHERE settled_state IS NOT NULL').get().c;
+    await hit(asToken(TOKEN));
+    const after = ['locks', 'ledger', 'legs', 'leg_overrides', 'audit', 'grade_queue']
+      .map((t) => g.raw.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c);
+    eq('a poll writes nothing anywhere', after, before);
+    eq('and settles nothing',
+      g.raw.prepare('SELECT COUNT(*) c FROM locks WHERE settled_state IS NOT NULL').get().c, after1);
+
+    // Read only in the HTTP sense too.
+    eq('a POST to the overlay route is a 405', (await hit(asToken(TOKEN), 'POST')).status, 405);
+
+    // An unconfigured deploy must not serve anything, with any token.
+    const noSecret = await worker.fetch(
+      new Request('https://api.example.com/overlay/parlays', { headers: asToken(TOKEN) }),
+      { ...env2, OVERLAY_TOKEN: '' });
+    eq('with no OVERLAY_TOKEN set, nothing is served', noSecret.status, 401);
+
+    clearOverlayCache();
+    const noUid = await worker.fetch(
+      new Request('https://api.example.com/overlay/parlays', { headers: asToken(TOKEN) }),
+      { ...env2, OVERLAY_UID: '' });
+    const noUidBody = JSON.parse(await noUid.text());
+    eq('with no OVERLAY_UID set, the board is empty', noUidBody.parlays.length, 0);
+    ok('and it says why', (noUidBody.errors || []).length > 0, JSON.stringify(noUidBody.errors));
+
+    // The origin allowlist is untouched by any of this.
+    const badOrigin = await worker.fetch(new Request('https://api.example.com/overlay/parlays', {
+      headers: { ...asToken(TOKEN), Origin: 'https://evil.example' },
+    }), env2);
+    eq('a disallowed origin is still a 403, overlay route included', badOrigin.status, 403);
+
+    // A pre-game slip must not cost a box score: 650KB of parsing cannot
+    // grade a game that has not kicked off, and this is polled every 25s.
+    const g3 = fresh();
+    await signUp(g3, 'u-tv', 'Grant');
+    const lg3 = (await call(g3, 'u-tv', 'POST', '/v1/leagues', { name: 'P', startBankrollCents: 10000 })).body.league.code;
+    await call(g3, 'u-tv', 'POST', '/v1/locks', {
+      code: lg3, weekKey: '2026-W45', stakeCents: 1000,
+      picks: [{ text: 'Seahawks ML', league: 'nfl', odds: -140 }],
+    });
+    clearOverlayCache();
+    clearFeedCache();
+    asked.length = 0;
+    const pre = await overlayParlays({ DB: g3.DB, OVERLAY_UID: 'u-tv' });
+    const preGame = (JSON.parse(fx('nfl_scoreboard.json')).events || []).some(
+      (e) => (((e.competitions || [])[0] || {}).status || e.status || {}).type?.state === 'pre');
+    if (preGame) {
+      eq('a game still to come costs no box score',
+        asked.filter((u) => u.includes('summary?event=')).length, 0);
+      ok('and its parlay is marked not started',
+        pre.parlays.every((x) => x.started === false),
+        JSON.stringify(pre.parlays.map((x) => x.started)));
+    } else {
+      ok('fixture board has no pre-game event, so startedOnly is covered by the live path', true);
+    }
+
+    // Nothing open at all is the common case all week, and it must not even
+    // reach for the network.
+    const g4 = fresh();
+    await signUp(g4, 'u-tv', 'Grant');
+    clearOverlayCache();
+    asked.length = 0;
+    const empty = await overlayParlays({ DB: g4.DB, OVERLAY_UID: 'u-tv' });
+    eq('no open locks means no parlays', empty.parlays.length, 0);
+    eq('and no fetches at all', asked.length, 0);
+
+    // The memo is what makes a 25 second poll cheap. Both caches are dropped
+    // first: the memo is keyed on the uid, which the checks above have been
+    // reusing against a different database.
+    clearOverlayCache();
+    clearFeedCache();
+    asked.length = 0;
+    await overlayParlays(env2);
+    const firstPoll = asked.length;
+    await overlayParlays(env2);
+    eq('a second poll inside the cache window fetches nothing more', asked.length, firstPoll);
+    ok('the first poll did fetch', firstPoll > 0, String(firstPoll));
+  } finally {
+    globalThis.fetch = realFetch;
+    clearOverlayCache();
+    clearFeedCache();
   }
 }
 

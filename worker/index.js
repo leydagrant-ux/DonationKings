@@ -21,6 +21,7 @@
  */
 
 import { runGrader, enqueueStatement } from './grader.js';
+import { overlayParlays } from './overlay.js';
 
 const JWKS_URL = 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0 O 1 I L
@@ -99,6 +100,35 @@ export async function verifyFirebaseToken(token, projectId) {
   if (claims.iss !== `https://securetoken.google.com/${projectId}`) throw new Error('wrong issuer');
   if (!claims.sub) throw new Error('no subject');
   return claims;
+}
+
+/* ========================== the TV overlay token ==========================
+ *
+ * One shared bearer token for the overlay route, and nothing else. It is a
+ * secret (`OVERLAY_TOKEN`), it is never accepted on any other path, and the
+ * uid it reads is a secret too, so holding it cannot be turned into a way to
+ * read the league or to write anything at all. See worker/overlay.js.
+ *
+ * Firebase is the wrong tool here: the client is a Python script on the house
+ * wifi, and doing it that way would mean real account credentials sitting in
+ * a config file on a laptop, for a convenience feature.
+ */
+
+/* Short enough to be a typo, not a secret. Refusing to serve rather than
+ * trusting a weak token means a half-finished deploy fails closed. */
+const MIN_OVERLAY_TOKEN = 32;
+
+/** Compare without an early return, so a wrong guess learns nothing from the clock. */
+export function overlayTokenOk(presented, expected) {
+  if (typeof presented !== 'string' || typeof expected !== 'string') return false;
+  if (expected.length < MIN_OVERLAY_TOKEN) return false;
+  const enc = new TextEncoder();
+  const a = enc.encode(presented);
+  const b = enc.encode(expected);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 /* ============================== validation ============================== */
@@ -629,10 +659,39 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
     if (!originOk) return json({ error: 'origin not allowed' }, 403, cors);
     if (!env.DB) return json({ error: 'no database binding' }, 500, cors);
-    if (!env.FIREBASE_PROJECT_ID) return json({ error: 'no project id configured' }, 500, cors);
+
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, '') || '/';
 
     const auth = request.headers.get('Authorization') || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+
+    /* The TV overlay. Its own token, read only, one person's locks, and it
+     * answers BEFORE the Firebase gate because its client has no Firebase.
+     * It is deliberately the only path that behaves this way, and it never
+     * falls through: a request here with the wrong token is refused rather
+     * than being offered to the token verifier. */
+    if (path === '/overlay/parlays') {
+      if (request.method !== 'GET') return json({ error: 'read only' }, 405, cors);
+      if (!token) return json({ error: 'overlay token required' }, 401, cors);
+      if (!overlayTokenOk(token, env.OVERLAY_TOKEN || '')) {
+        return json({ error: 'bad overlay token' }, 401, cors);
+      }
+      const week = url.searchParams.get('week');
+      try {
+        const payload = await overlayParlays(env, {
+          week: week && isWeekKey(week) ? week : null,
+        });
+        return json(payload, 200, cors);
+      } catch (e) {
+        console.error('overlay failed', e && e.message);
+        // An empty board, not a 500. The watcher treats either as "nothing
+        // to show", and this way a bad poll is visible in the payload.
+        return json({ parlays: [], errors: ['overlay failed'], generatedAt: Date.now() }, 200, cors);
+      }
+    }
+
+    if (!env.FIREBASE_PROJECT_ID) return json({ error: 'no project id configured' }, 500, cors);
     if (!token) return json({ error: 'sign in first' }, 401, cors);
 
     let claims;
@@ -652,9 +711,8 @@ export default {
       }
     }
 
-    const url = new URL(request.url);
     try {
-      return await route(request.method, url.pathname.replace(/\/+$/, '') || '/', body, env, claims, cors);
+      return await route(request.method, path, body, env, claims, cors);
     } catch (e) {
       // Never leak a SQL error to the client; it would describe the schema.
       console.error('route failed', url.pathname, e && e.message);
