@@ -11,10 +11,14 @@ bankroll for the week.
 ## Where it stands
 
 **SHIPPED, and it reads screenshots.** Live at <https://leydagrant-ux.github.io/DonationKings/>, backed
-by a deployed Worker and D1. 924 checks pass across three suites.
+by a deployed Worker and D1. 970 checks pass across three suites.
 
 Three bugs hit during NFL week 9 are fixed; see [The week 9 bugs](#the-week-9-bugs)
 below for what was wrong and what is still open.
+
+There is now a read-only route for the TV overlay, `GET /overlay/parlays`. It
+is written, tested and pushed but **NOT DEPLOYED**: see
+[The TV overlay route](#the-tv-overlay-route).
 
 Build steps 1, 2 and 3 are done.
 
@@ -368,6 +372,106 @@ impossible to take back. The schema test asserts both halves.
 column accepts `'2500'` and coerces it, because that conversion is lossless.
 It only refuses what would lose information. So the Worker validates types
 itself rather than leaning on STRICT, and both facts have tests.
+
+## The TV overlay route
+
+`GET /overlay/parlays`. One read-only route, serving the parlay board that
+runs on the TV upstairs (`../FantasyOverlay`, a Python watcher that draws on a
+TCL Google TV through TvOverlay's REST API).
+
+**Status: written, tested, pushed, NOT DEPLOYED.** The run that built it could
+not deploy, because the wrangler OAuth token on this machine had expired and
+could not be refreshed. Nothing about the endpoint is live yet. See
+[Deploying the overlay route](#deploying-the-overlay-route) below for the four
+commands.
+
+It exists because the watcher is a Python script on the house wifi with no
+Firebase. The alternative was Firebase auth from Python, which means real
+account credentials in a config file on a laptop for a convenience feature.
+
+What it returns: the configured person's open locks, with their legs already
+graded, in exactly the per-leg shape `dk/grade.js` emits (`state`, `clinched`,
+`dead`, `current`, `needed`, `pct`, `overshoot`, `render`, `label`), plus
+`stake_cents`, `payout_cents`, a `name` and `started`. That is the shape
+`FantasyOverlay/parlay.py` already consumed from mock data, so the contract
+was not invented here, it was met. A test asserts every key by name, so a
+rename on either side breaks a check rather than a television.
+
+Grading imports `deriveLock` and `feed.loadContext`, the same code the browser
+and the cron grader run. The server and the TV cannot reach different verdicts
+about a leg, which is the same reason `derive.js` carries no UI import.
+
+Four rules, all tested:
+
+- **It reads.** No INSERT, no UPDATE, nothing touching `ledger`,
+  `locks.settled_state` or `grade_queue`. A POST is a 405, and a test counts
+  the rows in six tables before and after a poll.
+- **One person.** The uid is `OVERLAY_UID`, a secret, never a request
+  parameter. There is no request that reads anybody else's bets, which is what
+  stops a token on a laptop becoming a way to read the league.
+- **Its own gate.** `OVERLAY_TOKEN` is a long random shared secret, compared
+  without an early return, refused outright below 32 characters so a
+  half-finished deploy fails closed rather than open, and accepted on no other
+  path. A Firebase ID token presented here is refused too: the route answers
+  before the Firebase gate and never falls through to it.
+- **Nothing else changed.** Every other route still demands a Firebase token,
+  and the origin allowlist still refuses this route from a disallowed origin.
+
+**Cost is the real constraint, not security.** It is polled every 25 seconds
+while a game is on, and one NFL box score is roughly 650KB of JSON whose parse
+is most of an invocation's CPU budget. So the work is bounded four ways: no
+open locks means no network call at all, which is most of the week; only
+STARTED games get a box score, via the new `startedOnly` option in
+`feed.loadContext` (off by default, so the app is unchanged, because the app
+wants the fixture for a leg still to come); at most six summaries a poll,
+overridable with `OVERLAY_MAX_SUMMARIES`; and the finished payload is memoed
+in the isolate for twelve seconds.
+
+Two consequences of that cap worth knowing, because they look like bugs:
+
+- **Which legs are graded shifts between polls.** With several open locks, the
+  six-summary cap means a leg whose box score was not loaded this time comes
+  back as `needs_review` or `pending`. That is a gap in what was fetched, not
+  a result. The watcher handles it: a leg that was settled and now is not
+  keeps its old snapshot, so a result is announced once instead of once per
+  gap.
+- **`errors` is normally non-empty on a Sunday.** `"9 more games on the slate
+  were not loaded"` is the cap working, not a failure.
+
+"Open locks" rather than "this week's", deliberately: an ISO week boundary
+falls on Monday morning, in the middle of nothing, while a Thursday lock is
+still running on Sunday. `?week=YYYY-Www` narrows it for anyone who wants it.
+
+### Deploying the overlay route
+
+The token already exists and is already in `FantasyOverlay/config.json` under
+`dk_token`. It is not in this repo and must not be. `worker/.dev.vars` holds a
+different, throwaway token for `wrangler dev` and is gitignored.
+
+Note `--config wrangler.toml` on every command. There is a stray
+`wrangler.jsonc` two directories up that names a different worker, and
+wrangler prefers it even when run from inside `worker/`, so a plain
+`npx wrangler deploy` here deploys the poker bankroll app.
+
+```powershell
+cd worker
+$tok = (Get-Content ..\..\FantasyOverlay\config.json -Raw | ConvertFrom-Json).dk_token
+$tok | npx wrangler secret put OVERLAY_TOKEN --config wrangler.toml
+"<your firebase uid>" | npx wrangler secret put OVERLAY_UID --config wrangler.toml
+npx wrangler deploy --config wrangler.toml
+```
+
+The uid is whichever row in `users` is yours:
+
+```powershell
+npx wrangler d1 execute donationkings --remote --config wrangler.toml --command "SELECT uid, display_name FROM users"
+```
+
+Then it should answer `{"error":"overlay token required"}` with no token and
+JSON with one. Before deployment it answers
+`{"error":"not signed in: malformed token"}`, because the path does not exist
+yet and falls to the Firebase gate: that is how to tell whether the deploy
+landed.
 
 ## Reading a screenshot
 
