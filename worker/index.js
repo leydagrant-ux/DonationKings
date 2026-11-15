@@ -182,7 +182,7 @@ async function leagueDetail(db, code, uid) {
 async function leagueLocks(db, code) {
   const { results: locks } = await db.prepare(
     `SELECT id, code, uid, week_key, stake_cents, payout_cents, boost_pct, book, placed_ts, eligible,
-            settled_state, settled_return_cents, settled_ts
+            first_start_ts, settled_state, settled_return_cents, settled_ts
        FROM locks WHERE code = ? ORDER BY placed_ts DESC LIMIT 500`,
   ).bind(code).all();
   if (!locks.length) return [];
@@ -215,6 +215,11 @@ async function leagueLocks(db, code) {
     boostPct: l.boost_pct,
     book: l.book,
     placedAt: l.placed_ts * 1000,
+    // The first kickoff across its legs. It is what the client anchors the
+    // slate on when it reloads a lock whose games are no longer on the
+    // current scoreboard; without it the only anchor is `placedAt`, which is
+    // right for a lock placed on the day and days early for one placed ahead.
+    firstStartAt: l.first_start_ts ? l.first_start_ts * 1000 : null,
     eligible: !!l.eligible,
     picks: byLock.get(l.id) || [],
     overrides: ovByLock.get(l.id) || {},

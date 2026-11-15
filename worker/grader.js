@@ -15,6 +15,7 @@
 
 import { deriveLock } from '../dk/derive.js';
 import { eventsFromScoreboard, snapshotFromSummary, LEAGUES } from '../dk/espn.js';
+import { dateKeyOf as dateKey } from '../dk/feed.js';
 import { STATE } from '../dk/grade.js';
 
 const BASE = 'https://site.api.espn.com/apis/site/v2/sports';
@@ -57,7 +58,7 @@ async function getJSON(url, budget) {
  * progress cannot settle a lock, so fetching its 650KB box score would be
  * spending the entire CPU budget to learn nothing.
  */
-async function contextFor(legs, budget, cache, attempts = 0) {
+async function contextFor(legs, budget, cache, attempts = 0, anchorTs = null) {
   const leagues = [...new Set(legs.map((l) => l.league).filter((lg) => LEAGUES[lg]))];
   const events = [];
 
@@ -66,10 +67,31 @@ async function contextFor(legs, budget, cache, attempts = 0) {
       const raw = await getJSON(`${BASE}/${LEAGUES[lg].path}/scoreboard`, budget);
       cache.boards.set(lg, raw ? eventsFromScoreboard(raw, lg) : []);
     }
-    events.push(...cache.boards.get(lg));
+    let board = cache.boards.get(lg);
+
+    /* A scoreboard asked for no date answers with the CURRENT week. A lock
+     * that has been backing off for a day or two is then graded against games
+     * it was never placed on: at best it can never settle, at worst it binds
+     * to the next fixture between the same two teams and settles off that.
+     *
+     * `?dates=YYYYMMDD` still returns a finished day months later, so when
+     * the lock predates everything on the current board, its own day is
+     * fetched instead. One extra request, and only for a lock that needs it.  */
+    const starts = board.map((e) => e.startAt).filter((n) => Number.isFinite(n));
+    const first = starts.length ? Math.min(...starts) : null;
+    if (anchorTs && first !== null && anchorTs * 1000 < first) {
+      const key = dateKey(anchorTs * 1000);
+      if (!cache.boards.has(`${lg}:${key}`)) {
+        const raw = await getJSON(`${BASE}/${LEAGUES[lg].path}/scoreboard?dates=${key}`, budget);
+        cache.boards.set(`${lg}:${key}`, raw ? eventsFromScoreboard(raw, lg) : []);
+      }
+      const own = cache.boards.get(`${lg}:${key}`);
+      if (own.length) board = own; // its own day, not today's
+    }
+    events.push(...board);
   }
 
-  // Which of today's finished games does this lock plausibly mention?
+  // Which of the finished games on those days does this lock mention?
   const wanted = [];
   for (const ev of events) {
     if (ev.state !== 'post') continue;
@@ -77,7 +99,11 @@ async function contextFor(legs, budget, cache, attempts = 0) {
       const text = String(leg.raw_text || '').toLowerCase();
       return [ev.home, ev.away].some((t) => t && t.names.some((n) => {
         const nn = String(n).toLowerCase();
-        return nn.length >= 3 && text.includes(nn);
+        // Whole words only: a raw substring let a three-letter abbreviation
+        // match inside a surname, so a prop on "Barrett Carter" pulled
+        // Carolina's box score and graded against it.
+        return nn.length >= 3
+          && new RegExp(`(^|[^a-z0-9])${nn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(text);
       }));
     });
     if (named) wanted.push(ev);
@@ -149,7 +175,8 @@ export async function runGrader(env, now = Math.floor(Date.now() / 1000)) {
     `SELECT q.attempts AS attempts,
             l.id AS id, l.code AS code, l.uid AS uid, l.week_key AS week_key,
             l.stake_cents AS stake_cents, l.boost_pct AS boost_pct,
-            l.placed_ts AS placed_ts, l.eligible AS eligible
+            l.placed_ts AS placed_ts, l.first_start_ts AS first_start_ts,
+            l.eligible AS eligible
        FROM grade_queue q JOIN locks l ON l.id = q.lock_id
       WHERE q.next_poll_ts <= ? AND l.settled_state IS NULL
       ORDER BY q.next_poll_ts
@@ -176,8 +203,15 @@ export async function runGrader(env, now = Math.floor(Date.now() / 1000)) {
       const overrides = {};
       for (const o of ov) overrides[o.idx] = o.state;
 
-      const ctx = await contextFor(legs, budget, cache, lock.attempts || 0);
-      const derived = deriveLock(toStored(lock, legs, overrides), ctx);
+      /* Anchor the slate on the lock's own first kickoff, falling back to
+       * when it was placed. Without this a lock that has been in backoff
+       * since the weekend is graded against next week's board. */
+      const anchor = lock.first_start_ts || lock.placed_ts || null;
+      const ctx = await contextFor(legs, budget, cache, lock.attempts || 0, anchor);
+      const stored = toStored(lock, legs, overrides);
+      // Only the games on those days may settle this lock.
+      ctx.scope = new Map([[stored.id, new Set(ctx.events.map((e) => e.eventId))]]);
+      const derived = deriveLock(stored, ctx);
 
       if (!derived.roll || !derived.roll.final) {
         // Not finished, or a leg needs a person. Either way, try later.

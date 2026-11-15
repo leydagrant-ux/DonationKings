@@ -25,6 +25,7 @@ import * as ST from './store.js';
 import * as DV from './derive.js';
 import * as SL from './slip.js';
 import * as STS from './stats.js';
+import * as FD from './feed.js';
 import { lockTitle as UI_lockTitle, pipState as UI_pipState } from './ui.js';
 
 // ---------------------------------------------------------------------------
@@ -2262,6 +2263,268 @@ function testPricing(t, fx) {
 }
 
 // ---------------------------------------------------------------------------
+// The week 9 bugs
+// ---------------------------------------------------------------------------
+//
+// Three things went wrong on a real NFL Sunday and all three are pinned here,
+// each by the thing that actually broke rather than by its symptom:
+//
+//   1. Locks stayed "live" for ever, because the slate was always TODAY'S.
+//   2. A bet placed mid-game arrived with no game attached.
+//   3. Some props read the wrong stat, or the wrong team's score.
+
+function testWeekNine(t, snaps, fixtures) {
+  /* --- 3a. the stat table's ordering ----------------------------------- */
+  //
+  // Two of these were settling money wrongly. A bare `attempts` sat ABOVE
+  // `rushing attempts`, so every rushing-attempts prop was read as passing
+  // attempts, which a running back has none of: the box score said 18 and the
+  // grader used 0, so an over that won was paid as a loss. `receptions` sat
+  // above `longest reception` the same way, reading a 48-yard long as 10
+  // catches. Ordering is the only thing keeping these apart, so the whole
+  // vocabulary is swept rather than spot-checked.
+  t.section('week 9: every book wording reads as the right stat');
+  const FOOTBALL_WORDINGS = {
+    passYards: ['Passing Yards', 'Pass Yards', 'Pass Yds', 'Passing Yds'],
+    passTd: ['Passing Touchdowns', 'Passing TDs', 'Pass TDs', 'Pass TD'],
+    completions: ['Completions', 'Pass Completions', 'Passing Completions', 'Comp'],
+    passAttempts: ['Pass Attempts', 'Passing Attempts', 'Attempts'],
+    interceptionsThrown: ['Interceptions Thrown', 'INTs Thrown'],
+    rushYards: ['Rushing Yards', 'Rush Yards', 'Rush Yds'],
+    rushTd: ['Rushing Touchdowns', 'Rushing TDs', 'Rush TDs'],
+    rushAttempts: ['Rushing Attempts', 'Rush Attempts', 'Carries', 'Rushing Att'],
+    recYards: ['Receiving Yards', 'Rec Yards', 'Rec Yds'],
+    recTd: ['Receiving Touchdowns', 'Receiving TDs', 'Rec TDs'],
+    receptions: ['Receptions', 'Catches', 'Rec'],
+    targets: ['Targets'],
+    longRec: ['Longest Reception', 'Longest Rec', 'Long Reception', 'Longest Receiving'],
+    longRush: ['Longest Rush', 'Longest Rushing', 'Long Rush'],
+    fgMade: ['Field Goals Made', 'FG Made', 'FGM', 'Field Goals'],
+    kickingPoints: ['Kicking Points'],
+    tackles: ['Tackles', 'Total Tackles', 'Combined Tackles', 'Tackles + Assists'],
+    sacks: ['Sacks'],
+    anytimeTd: ['Anytime Touchdown', 'Anytime TD', 'Touchdown Scorer', 'Touchdowns'],
+    scrimmageYards: ['Rush + Rec Yards', 'Rush/Rec Yards', 'Scrimmage Yards'],
+    passRushYards: ['Pass + Rush Yards', 'Passing + Rushing Yards'],
+    fantasyScore: ['Fantasy Points', 'Fantasy Score', 'FPTS'],
+  };
+  const BASKETBALL_WORDINGS = {
+    points: ['Points', 'Pts'],
+    rebounds: ['Rebounds', 'Reb', 'Total Rebounds'],
+    assists: ['Assists', 'Ast'],
+    steals: ['Steals', 'Stl'],
+    blocks: ['Blocks', 'Blk'],
+    threesMade: ['3-Pointers Made', 'Three Pointers Made', 'Made Threes', '3PT Made', 'Threes'],
+    ftMade: ['Free Throws Made', 'FTM'],
+    pra: ['Pts+Reb+Ast', 'Points + Rebounds + Assists', 'PRA'],
+    pointsRebounds: ['Pts+Reb'],
+    pointsAssists: ['Pts+Ast'],
+    reboundsAssists: ['Reb+Ast'],
+    stocks: ['Stocks', 'Steals + Blocks'],
+    turnovers: ['Turnovers', 'TOV'],
+    minutes: ['Minutes', 'Min'],
+  };
+  const misread = [];
+  let swept = 0;
+  for (const [table, sport] of [[FOOTBALL_WORDINGS, 'football'], [BASKETBALL_WORDINGS, 'basketball']]) {
+    for (const [stat, forms] of Object.entries(table)) {
+      for (const form of forms) {
+        swept += 1;
+        const got = R.matchStat(form, sport);
+        if (got !== stat) misread.push(`"${form}" -> ${got}, wanted ${stat}`);
+      }
+    }
+  }
+  t.eq(`all ${swept} wordings read correctly`, misread, []);
+  // The two that were costing money, named so a reordering cannot undo them
+  // quietly.
+  t.eq('"Rushing Attempts" is not passing attempts', R.matchStat('Rushing Attempts', 'football'), 'rushAttempts');
+  t.eq('"Longest Reception" is not receptions', R.matchStat('Longest Reception', 'football'), 'longRec');
+  // A bare "Interceptions" is deliberately NOT guessed: it is the market a
+  // quarterback throws and the one a defensive back catches, and picking
+  // either would settle the other wrongly. It goes to a person.
+  t.eq('a bare "Interceptions" is left for a person', R.matchStat('Interceptions', 'football'), null);
+
+  /* --- 3b. a team abbreviation is not part of a player's name ---------- */
+  //
+  // The loose team pass used a raw substring against every naming field, so
+  // a three-letter abbreviation matched anywhere inside a surname: "Barrett
+  // Carter" resolved to CAR, "LaCale London" to LAC, "Charles Snowden" to
+  // DEN. Combined with an unrecognized stat wording, which fell through to
+  // the team total market, 306 player props on the real week 9 slate were
+  // settled off a team's score. The expectation is derived from the board
+  // rather than written down: a name built BY burying each abbreviation
+  // inside longer words must match nothing.
+  t.section('week 9: a team abbreviation inside a name is not that team');
+  const board = E.eventsFromScoreboard(fixtures.nflBoard, 'nfl');
+  const buried = [];
+  for (const ev of board) {
+    for (const side of ['home', 'away']) {
+      const abbr = ev[side] && ev[side].abbr;
+      if (!abbr) continue;
+      const name = `${abbr}rrett ${abbr}rter`; // CAR -> "CARrett CARter"
+      const r = R.resolveTeam(name, board);
+      if (r.eventId) buried.push(`${name} -> ${r.teamAbbr || r.eventId}`);
+    }
+  }
+  t.ok(`the board has teams to test (${board.length} games)`, board.length > 0);
+  t.eq('an abbreviation buried in a word matches nothing', buried, []);
+  // And the loose pass still does the job it was written for: a whole team
+  // name with junk around it, and a matchup written in abbreviations.
+  const first = board[0];
+  const loose = R.resolveTeam(`${first.home.names[1]} `, board);
+  t.eq('a real team name still resolves', loose.teamAbbr, first.home.abbr);
+  const vs = R.resolveTeam(`${first.away.abbr} @ ${first.home.abbr}`, board);
+  t.eq('and an abbreviated matchup still finds its game', vs.eventId, first.eventId);
+
+  /* --- 3c. a stat nobody recognizes is not a team total ---------------- */
+  //
+  // A team total is written with nothing after the line ("Packers Over
+  // 30.5"); a player prop always names its stat. Reading the second as the
+  // first is what let an unknown wording be graded, confidently, off a
+  // team's score.
+  t.section('week 9: an unreadable stat asks rather than guessing');
+  const unknown = R.parseLegText('Barrett Carter Over 2.5 Quibbles', 'football');
+  t.eq('it is not a team total', unknown.market, null);
+  t.ok('and says which words it could not read', /Quibbles/.test(unknown.reason || ''));
+  t.eq('with no confidence at all', unknown.confidence, R.C.NONE);
+  // A genuine team total is untouched.
+  t.eq('a real team total still parses', R.parseLegText('Packers Over 30.5', 'football').market, 'team_total');
+  t.eq('and so does one that says total twice', R.parseLegText('Packers Over 30.5 Team Total', 'football').market, 'team_total');
+  t.eq('a game total by its matchup too', R.parseLegText('Bears vs Packers Over 44.5', 'football').market, 'game_total');
+
+  /* --- 3d. the first touchdown is not whoever shares a surname -------- */
+  t.section('week 9: a surname alone does not win a first-TD leg');
+  const nfl = snaps.nfl;
+  const scorer = [...nfl.players.values()].find((p) => p.lastNorm && p.fullNorm);
+  // Two men with that surname in the same box score, which week 9 really had:
+  // David Walker and Jahdae Walker at Chicago, four players named Williams at
+  // New England.
+  const twin = { ...scorer, id: `${scorer.id}-twin`, firstNorm: 'zz', fullNorm: `zz ${scorer.lastNorm}` };
+  const shared = patch(nfl, {
+    firstTdScorerName: scorer.display,
+    players: new Map([...nfl.players, [twin.id, twin]]),
+    byLast: new Map([...nfl.byLast, [scorer.lastNorm, [scorer, twin]]]),
+  });
+  const firstTdLeg = (athleteId) => ({ market: 'first_td', stat: 'firstTd', athleteId, side: 'yes', line: null });
+  t.eq('the other man with the surname does not win it',
+    G.gradeLeg(firstTdLeg(twin.id), shared).state, G.STATE.LOST);
+  t.eq('the man who scored does',
+    G.gradeLeg(firstTdLeg(scorer.id), shared).state, G.STATE.WON);
+  // One man with the surname, and the leg naming only that: still a win.
+  t.eq('a surname nobody else shares still settles',
+    G.gradeLeg(firstTdLeg(scorer.id), patch(nfl, { firstTdScorerName: scorer.display })).state, G.STATE.WON);
+
+  /* --- 1. the slate is the lock's own week, not today's ---------------- */
+  //
+  // The lock-stays-live bug. Nothing transitioned a lock out of live because
+  // the data that would settle it was never fetched: a scoreboard asked for
+  // no date answers with the CURRENT week, so once the board rolled over the
+  // lock's games were unreachable and every leg sat on "waiting for the game
+  // to start" indefinitely. Worse, when the same two teams played again the
+  // leg bound to the NEW fixture and could settle off it.
+  t.section('week 9: a Sunday night game belongs to Sunday');
+  // ESPN buckets a board by US Eastern date, so a 20:20 ET kickoff that is
+  // 01:20 UTC the next day sits on the earlier board. Verified against the
+  // live endpoint: ?dates=20261108 returns the game dated 2026-11-09T01:20Z.
+  t.eq('a 01:20 UTC Monday kickoff keys to Sunday', FD.dateKeyOf(Date.parse('2026-11-09T01:20Z')), '20261108');
+  t.eq('a Sunday afternoon kickoff keys to Sunday', FD.dateKeyOf(Date.parse('2026-11-08T18:00Z')), '20261108');
+  t.eq('and nothing is not a day', FD.dateKeyOf(undefined), null);
+
+  t.section('week 9: a lock is graded against its own game, not a later one');
+  // The same fixture a week apart, with opposite results. This is exactly
+  // what settled a week 8 Chiefs moneyline as a WIN off week 9's Chiefs
+  // game: KC lost 24-28 at Denver, then beat the Jets 35-12 seven days on.
+  const home = nfl.home.abbr;
+  const thisWeek = patch(nfl, { eventId: 'E-now' });
+  const nextWeek = patchTeam(
+    patchTeam(patch(nfl, { eventId: 'E-next' }), 'home', { score: nfl.away.score, winner: nfl.away.winner }),
+    'away', { score: nfl.home.score, winner: nfl.home.winner },
+  );
+  const WEEK = 7 * 86400000;
+  const placed = Date.parse('2026-11-08T17:00Z');
+  const evOf = (eventId, startAt) => ({
+    eventId, league: 'nfl', startAt, state: 'post', home: nfl.home, away: nfl.away,
+  });
+  const stored = {
+    id: 'L-wk9', code: 'C', uid: 'me', stakeCompCents: 2500, payoutCents: 5000,
+    placedAt: placed, firstStartAt: placed + 3600000,
+    picks: [{ text: `${home} ML`, league: 'nfl', odds: -120 }],
+  };
+  const both = {
+    events: [evOf('E-now', placed + 3600000), evOf('E-next', placed + WEEK)],
+    snapshots: [thisWeek, nextWeek],
+  };
+  // Unscoped, the two fixtures are indistinguishable by wording, so the
+  // resolver refuses rather than guessing. That is the honest failure.
+  const blind = DV.deriveLock(stored, both);
+  t.ok('with no scope the two fixtures are ambiguous', !blind.legs[0].leg.eventId);
+  // Scoped to the week it was placed in, it settles off the right game.
+  const scoped = DV.deriveLock(stored, { ...both, scope: new Map([['L-wk9', new Set(['E-now'])]]) });
+  t.eq('scoped to its own week it finds its game', scoped.legs[0].leg.eventId, 'E-now');
+  t.eq('and settles off that result', scoped.legs[0].verdict.state,
+    nfl.home.winner === true ? G.STATE.WON : G.STATE.LOST);
+  t.ok('so it stops being a live lock', DV.isOpenLock(scoped) === false);
+  // Pointed at the later fixture it reaches the opposite answer, which is the
+  // money bug the scope exists to prevent.
+  const misScoped = DV.deriveLock(stored, { ...both, scope: new Map([['L-wk9', new Set(['E-next'])]]) });
+  t.ok('the later fixture really would settle the other way',
+    misScoped.legs[0].verdict.state !== scoped.legs[0].verdict.state);
+  // A leg that already knows its game needs no scope at all.
+  const pinned = DV.deriveLock({ ...stored, picks: [{ ...stored.picks[0], eventId: 'E-now' }] }, both);
+  t.eq('a leg pinned to its game resolves on its own', pinned.legs[0].leg.eventId, 'E-now');
+
+  /* --- 2. a bet placed mid-game is attached to its game --------------- */
+  //
+  // It used to be handed the GRADING slate, which the app empties whenever
+  // you hold no open locks, so the first lock of a session went up with no
+  // kickoff at all. The server reads a missing kickoff as "no game had
+  // started", so a bet placed 90 minutes in counted for the week, and the
+  // "cannot delete after kickoff" guard never fired either. It also matched
+  // team wording only, so a player prop never found a kickoff even when the
+  // slate WAS loaded.
+  t.section('week 9: a bet placed mid-game knows which game it is on');
+  const live = patch(nfl, { eventId: 'E-live', state: 'in', completed: false });
+  const slate = [{
+    eventId: 'E-live', league: 'nfl', startAt: placed - 5400000, state: 'in',
+    home: nfl.home, away: nfl.away,
+  }];
+  const played = [...live.players.values()].find((p) => p.groups.has('passing'));
+
+  const teamLeg = R.attachEvents([{ text: `${home} ML`, league: 'nfl' }], { events: slate, snapshots: [live] });
+  t.eq('a team leg is attached', teamLeg.picks[0].eventId, 'E-live');
+  t.eq('and reports that game\'s kickoff', teamLeg.firstStartAt, slate[0].startAt);
+
+  const propLeg = R.attachEvents(
+    [{ text: `${played.display} Over 100.5 Passing Yards`, league: 'nfl' }],
+    { events: slate, snapshots: [live] },
+  );
+  t.eq('a player prop is attached too, from the box score', propLeg.picks[0].eventId, 'E-live');
+  t.eq('and reports the same kickoff', propLeg.firstStartAt, slate[0].startAt);
+
+  // The old bug in one line: handed no slate it finds nothing, and that is
+  // what the server was told on every mid-game bet.
+  const blindAttach = R.attachEvents([{ text: `${home} ML`, league: 'nfl' }], { events: [], snapshots: [] });
+  t.eq('with no slate nothing is attached', blindAttach.picks[0].eventId, undefined);
+  t.eq('and there is no kickoff to report', blindAttach.firstStartAt, null);
+
+  // The earliest kickoff across several legs, which is the one that decides
+  // eligibility.
+  const later = {
+    eventId: 'E-later', league: 'nfl', startAt: placed + 7200000, state: 'pre',
+    home: { abbr: 'ZZA', names: ['ZZA', 'Zedders'] },
+    away: { abbr: 'ZZB', names: ['ZZB', 'Zeebers'] },
+  };
+  const two = R.attachEvents(
+    [{ text: 'Zedders ML', league: 'nfl' }, { text: `${home} ML`, league: 'nfl' }],
+    { events: [...slate, later], snapshots: [live] },
+  );
+  t.eq('the earliest of several kickoffs wins', two.firstStartAt, slate[0].startAt);
+  t.ok('and every leg keeps its own game',
+    two.picks[0].eventId === 'E-later' && two.picks[1].eventId === 'E-live');
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -2291,6 +2554,7 @@ export function runAll(fixtures) {
   testPromisedPayout(t);
   testStats(t);
   testPricing(t, fixtures);
+  testWeekNine(t, snaps, fixtures);
   const ms = Date.now() - t0;
   const passed = t.results.filter((r) => r.pass).length;
   return { results: t.results, passed, failed: t.results.length - passed, ms };

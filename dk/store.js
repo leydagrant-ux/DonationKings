@@ -116,7 +116,7 @@ export function importState(text) {
  * progress are all derived from live data every render, so a stale grade can
  * never be persisted and then believed.
  */
-export function newLock({ code, uid: ownerUid, stakeCents, picks, placedAt, boostPct, payoutCents, book }) {
+export function newLock({ code, uid: ownerUid, stakeCents, picks, placedAt, firstStartAt, boostPct, payoutCents, book }) {
   const at = placedAt === undefined ? Date.now() : placedAt;
   return {
     id: uid('L'),
@@ -133,7 +133,15 @@ export function newLock({ code, uid: ownerUid, stakeCents, picks, placedAt, boos
     // Fixed at placement, never recomputed from the settle time: a Sunday
     // night game graded at 3am Monday still belongs to Sunday's week.
     weekKey: null, // filled by the caller, which knows the league's week
-    picks: picks.map((p) => ({ text: p.text, league: p.league, odds: p.odds })),
+    // `eventId` is the game the entry form attached the leg to, kept because
+    // two fixtures between the same teams a week apart read identically.
+    picks: picks.map((p) => ({
+      text: p.text, league: p.league, odds: p.odds, eventId: p.eventId || null,
+    })),
+    // The earliest kickoff across the legs. The slate a stale lock is graded
+    // against is anchored on this, so a lock placed days ahead still finds
+    // its own day rather than the day it was written.
+    firstStartAt: firstStartAt === undefined ? null : firstStartAt,
     // Manual overrides, keyed by leg index, for anything the engine refuses
     // to grade. Written only by a person, and never cleared by the engine.
     overrides: {},

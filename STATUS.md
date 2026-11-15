@@ -11,7 +11,10 @@ bankroll for the week.
 ## Where it stands
 
 **SHIPPED, and it reads screenshots.** Live at <https://leydagrant-ux.github.io/DonationKings/>, backed
-by a deployed Worker and D1. 485 checks pass across three suites.
+by a deployed Worker and D1. 924 checks pass across three suites.
+
+Three bugs hit during NFL week 9 are fixed; see [The week 9 bugs](#the-week-9-bugs)
+below for what was wrong and what is still open.
 
 Build steps 1, 2 and 3 are done.
 
@@ -61,7 +64,8 @@ dk/auth.js      Firebase sign-in, and nothing else
 dk/api.js       calls to the Worker
 dk/config.js    the two things to fill in before leagues can be shared
 dk/store.js     versioned localStorage, migrations, demo data
-dk/feed.js      the ONLY module that touches the score feed
+dk/feed.js      the ONLY module that touches the score feed, and the only
+                one that knows a lock is graded against its OWN day
 dk/derive.js    stored lock + live data -> verdicts, prices, progress
 dk/odds.js      odds, payouts, parlay pricing, reconciliation, bankroll rules
 dk/espn.js      the ONLY file that knows an ESPN field name. Raw JSON -> snapshot
@@ -75,7 +79,7 @@ dk/ui-league.js switcher, standings, history, invite, owner controls
 dk/ui-entry.js  adding a lock by hand, with a live parser readback
 dk/slip.js      slip transcript -> draft lock. Pure, and the reason this works
 dk/ingest.js    compress a screenshot, send it up, hand back a draft
-dk/selftest.js  444 checks over all the pure modules
+dk/selftest.js  773 checks over all the pure modules
 preview.html    static design preview, real fixtures through the real engine
 selftest.html   browser test runner; sets document.title to the result
 design/         exported screenshots of the current look
@@ -217,7 +221,10 @@ API key, sends `Access-Control-Allow-Origin: *` with a 4 second cache, does not
 block non-browser user agents, and updates player stats mid-game.
 
 **Four traps, each of which silently grades bets wrong.** Every one has a
-regression test; do not "simplify" them away.
+regression test; do not "simplify" them away. Three more turned up during
+week 9 and are written up under [The week 9 bugs](#the-week-9-bugs): the stat
+table's ORDER is load-bearing, a team abbreviation must never match inside a
+player's name, and a lock must be graded against its own day's slate.
 
 1. **Align `stats[]` to `labels[]`, never to `keys[]`.** `keys` looks like the
    better thing to match on and is not always the same length: CFB passing has
@@ -443,6 +450,152 @@ Settlement is idempotent in both directions: whichever of a phone or the cron
 gets there first writes the record, and the other is a harmless no-op. The
 ledger's `UNIQUE` idempotency key is what makes that structural rather than a
 convention.
+
+## The week 9 bugs
+
+Three things went wrong using it live on NFL week 9 (games 8 and 9 November
+2026), reported on the 14th. All three were reproduced against the real week 8
+and week 9 payloads before anything was changed, which matters because two of
+them were quietly settling money the wrong way rather than merely looking
+broken. `?dates=20261108` still returns that whole Sunday months later, so the
+slate can be replayed rather than guessed at.
+
+**None of the three was in the display layer.** This app does not mirror
+somebody else's score, it works the grade out itself, so every one of these was
+in how a bet is attached to a game or how a stat is read.
+
+### 1. Locks stayed "live" for ever
+
+**Nothing transitioned them out, because the data that would have settled them
+was never fetched.** A scoreboard asked for no date answers with the CURRENT
+week. `feed.loadContext` and the cron grader both did exactly that, so once the
+board rolled over to week 10 a week 9 lock's games were simply not in the
+reply. Every leg fell back to "waiting for the game to start" (true enough:
+next week's games really had not started), `isOpenLock` stayed true, and the
+Live tab showed it for ever. Reproduced: on 14 November a week 9 lock came back
+`pending`, `isOpen=true`, nothing paid.
+
+The worse half is that it did not always just linger. Teams play again. The
+leg "Green Bay Packers -3.5" bound itself to week 10's Packers fixture, and a
+week 8 "Kansas City Chiefs ML" replayed against week 9's board settles **won**
+off the Jets game when it really **lost** 24-28 at Denver. Both are real
+payloads; that is a $48 payout on a losing bet.
+
+Fixed by asking for the lock's own day. `feed.loadContext` keeps the current
+board for anything placed this week, and for a lock whose games are behind
+everything on that board it fetches `?dates=YYYYMMDD` from its own anchor
+forward (`firstStartAt`, else `placedAt`, four days at most, never into the
+current board). The context now carries `scope`: lock id to the set of event
+ids that lock may be graded against, and `derive.js` applies it, so the same
+fixture a week later is not even a candidate. `worker/grader.js` does the same
+for a lock that has been in backoff since the weekend.
+
+Two things worth keeping:
+
+- **ESPN buckets a board by US Eastern date.** A Sunday night game kicking at
+  20:20 ET is 01:20 UTC on Monday and sits on SUNDAY's board. `dateKeyOf` in
+  `feed.js` is the only place that knows this.
+- **`?dates=` is a day, not a week.** Week 9 had 15 games and `?dates=20261108`
+  returns 13 of them: the Thursday and Monday games are on their own days.
+  `?dates=2026&seasontype=2&week=9` returns all 15 in one request and is the
+  cheaper primitive if this ever needs to be tightened, but it is football-only
+  and needs the season and week numbers, which a lock does not carry.
+
+### 2. A bet placed mid-game arrived with no game attached
+
+`earliestStart` in `app.js` was handed `ctx.events`, the GRADING slate, which
+`refresh()` empties on purpose whenever you hold no open locks. So the first
+lock of a session had nothing to match against and went to the server with
+`firstStartAt: null`. It also scanned for team wording only, so a player prop
+never found a kickoff even when the slate was loaded.
+
+The server reads a missing kickoff as "no game had started", so a bet placed
+**90 minutes into the game** came back `eligible: true` and counted for the
+week, and the "Saved, but a game had already started" toast never fired. With
+`first_start_ts` null the server's own "a lock cannot be deleted after kickoff"
+guard cannot fire either, so a mid-game loser could be taken back off the
+standings. All three reproduced through the real route handlers.
+
+Now `resolve.attachEvents` does it: a pure function of the legs and the slate,
+given the slate the entry form already holds for its prices, and resolving each
+leg properly rather than scanning text. Mid-game that answers the player-prop
+case too, because the game is running, so its box score exists and the player
+is in it. It returns each pick carrying its `eventId` and the earliest kickoff
+across them. The Worker now returns `firstStartAt` on a lock as well, so the
+feed can anchor on the real kickoff rather than on when the bet was written.
+
+**What is still open.** A player prop placed BEFORE any kickoff cannot name its
+game: no box score exists yet, so there is nothing to match the name against.
+Those still go up with no kickoff, which is harmless for eligibility (no game
+had started, so it does count) but leaves the delete-after-kickoff guard blind
+for that one case. Closing it properly means storing the event id per leg
+server-side, `ALTER TABLE legs ADD COLUMN event_id TEXT`, and having the first
+grader tick fill it in. `derive.js` already prefers `pick.eventId` when one is
+there, and the local signed-out path already keeps it, so the client half is
+done; only the column and the route are missing.
+
+### 3. Some props read the wrong stat, and some read the wrong team's score
+
+Two separate faults, and between them the only ones here that were settling
+bets wrongly with nobody able to tell.
+
+**The stat table was in the wrong order.** A bare `attempts` sat above
+`rushing attempts`, so every rushing-attempts prop was read as PASSING
+attempts, which a running back has none of. Kenneth Walker III carried 18 times
+in week 9; the grader read 0 and settled an over on 16.5 as a loss. The same
+shape of mistake had `receptions` above `longest reception`, so CeeDee Lamb's
+48-yard long was graded as his 10 catches. Both now read correctly off the real
+payloads. The bare daily-fantasy forms still exist, they just sit after every
+"passing ..." AND "rushing ..." version now. Missing wordings were added at the
+same time (`Carries`, `FG Made`, `FGM`, `Field Goals`, `Long Rush`, bare `Rec`,
+`Stl`, `Blk`): 69 of 70 real book wordings now read correctly, up from 56.
+
+A bare "Interceptions" is deliberately still not matched. It is the market a
+quarterback throws and the one a defensive back catches, and guessing either
+settles the other wrongly, so it goes to a person.
+
+**A team abbreviation was matching inside a player's name.** `resolveTeam`'s
+loose containment pass tested raw substrings against every naming field, so
+three letters matched anywhere: "Barrett **Car**ter" resolved to CAR, "La**Cal**e
+London" to LAC, "**Den**zel Boston" and "Charles Snow**den**" to DEN. On its own
+that was a wasted fetch. Combined with an unrecognized stat wording, which fell
+through to the TEAM TOTAL market at exactly the auto-grade confidence, **306
+player props on the real week 9 slate were settled off a team's score**. The
+loose pass now matches on whole words only, and that count is zero.
+
+The fall-through itself is closed as well, which is the more important half: a
+team total is written with nothing after the line ("Packers Over 30.5") and a
+player prop always names its stat, so wording left over after the number that
+is not a stat this app knows is an unrecognized market and goes to review,
+naming the words it could not read. It is no longer a team total.
+
+**First-TD legs could be won by the wrong man.** The scorer is matched from
+play text, and the surname fallback had no uniqueness check, so with David
+Walker and Jahdae Walker both at Chicago, or four players named Williams at New
+England, a first-TD leg cashed on whichever one you did not back. A surname now
+only settles it when the box score holds exactly one of them.
+
+Two name traps from the sibling projects were checked and are NOT present here:
+suffixes are stripped by `normName`, so "Michael Penix Jr." keys on "penix"
+correctly, verified across every suffixed player on the week 9 slate; and this
+app reads names from `scoringPlays` (full names) rather than from play-by-play,
+so the `S.Perine` abbreviation never reaches it. The initial-with-no-space form
+("J.Love") does fail to resolve, all 281 of them, so do not feed it one.
+
+### What is still honestly unresolved
+
+- **Team defence props** ("Packers D/ST Over 1.5 Sacks") are not a supported
+  market and go to review. The subject is a team, not a player, and nothing
+  routes it to the team's defensive totals.
+- **A bare game total** ("Over 44.5") still needs the matchup named, because a
+  thirteen-game slate cannot say which game it belongs to. This is the design
+  working: guessing would be a silent loss.
+- **The live database could not be read from here**, so which of Grant's own
+  week 9 legs were affected is unknown. The failure modes above are
+  characterised against the real slate by prop class rather than by his actual
+  bets.
+
+---
 
 ## Next task
 

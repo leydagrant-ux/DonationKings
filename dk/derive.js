@@ -49,10 +49,22 @@ export function deriveLock(stored, ctx) {
 
   const byId = new Map((ctx.snapshots || []).map((s) => [s.eventId, s]));
 
+  /* The games this lock is allowed to be graded against: the ones on its own
+   * days, which `feed.loadContext` worked out. Without it a lock was resolved
+   * against whatever was on the board at render time, so a week nine
+   * "Packers -3.5" bound itself to week TEN's Packers game and would have
+   * settled off it. No scope means no restriction, so a caller that does not
+   * build one is unaffected. */
+  const allowed = ctx.scope ? ctx.scope.get(stored.id) : null;
+  const inScope = (id) => !allowed || allowed.has(id);
+
   const legs = picks.map((pick, i) => {
-    const pool = (ctx.snapshots || []).filter((s) => s.league === pick.league);
-    const events = (ctx.events || []).filter((e) => e.league === pick.league);
-    const leg = resolveLeg({ rawText: pick.text }, { league: pick.league, events, snapshots: pool });
+    const pool = (ctx.snapshots || []).filter((s) => s.league === pick.league && inScope(s.eventId));
+    const events = (ctx.events || []).filter((e) => e.league === pick.league && inScope(e.eventId));
+    // A leg may already know its game: the entry form pins it when it can,
+    // and `resolveLeg` prefers it over anything it could work out itself.
+    const pinned = pick.eventId && inScope(pick.eventId) ? String(pick.eventId) : undefined;
+    const leg = resolveLeg({ rawText: pick.text, eventId: pinned }, { league: pick.league, events, snapshots: pool });
     leg.oddsAmerican = pick.odds;
 
     const snapshot = leg.eventId ? byId.get(leg.eventId) || null : null;

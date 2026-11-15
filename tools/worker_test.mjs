@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { route, validateLockBody, isCode, isWeekKey, isCents, isAmerican, verifyFirebaseToken } from '../worker/index.js';
 import { runGrader, LIMITS } from '../worker/grader.js';
+import { dateKeyOf } from '../dk/feed.js';
 
 const SCHEMA = readFileSync(new URL('../worker/schema.sql', import.meta.url), 'utf8');
 
@@ -434,6 +435,122 @@ sec('grader: settling for real, against real ESPN payloads');
     eq('a later tick finds nothing to do', again.settled, 0);
     eq('and no extra payout appears',
       g.raw.prepare("SELECT COUNT(*) c FROM ledger WHERE kind='payout'").get().c, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+sec('week 9: the lock knows its own kickoff, and the grader uses it');
+{
+  // Two halves of the same bug. The client needs the first kickoff back so it
+  // can fetch the right day's slate instead of today's; the grader needs it
+  // so a lock that has been in backoff since the weekend is not graded
+  // against next week's board.
+  const g = fresh();
+  await signUp(g, 'u1', 'Grant');
+  const lg = (await call(g, 'u1', 'POST', '/v1/leagues', { name: 'G', startBankrollCents: 10000 })).body.league.code;
+
+  // An hour from now, because the SERVER clock decides eligibility and a
+  // kickoff in the past is late by definition.
+  const kick = (Math.floor(Date.now() / 1000) + 3600) * 1000;
+  const made = await call(g, 'u1', 'POST', '/v1/locks', {
+    code: lg, weekKey: '2026-W45', stakeCents: 1000, payoutCents: 2500,
+    picks: [{ text: 'Packers ML', league: 'nfl', odds: -165 }],
+    placedAt: kick - 3600000, firstStartAt: kick,
+  });
+  eq('a lock placed before kickoff counts', made.body.eligible, true);
+  // And the same lock, with the kickoff an hour BEHIND the server clock, is
+  // the mid-game case: tracked, but outside the competition.
+  const late = await call(g, 'u1', 'POST', '/v1/locks', {
+    code: lg, weekKey: '2026-W45', stakeCents: 1000, payoutCents: 2500,
+    picks: [{ text: 'Packers ML', league: 'nfl', odds: -165 }],
+    placedAt: Date.now(), firstStartAt: kick - 2 * 3600000,
+  });
+  eq('one placed after kickoff does not', late.body.eligible, false);
+  // THE consequence of a mid-game bet arriving with no kickoff attached: with
+  // first_start_ts null this guard cannot fire, so a loser could be taken
+  // back off the standings after the game had started.
+  eq('and cannot then be deleted', (await call(g, 'u1', 'DELETE', `/v1/locks/${late.body.id}`)).status, 400);
+  const read = (await call(g, 'u1', 'GET', `/v1/leagues/${lg}`)).body.locks.find((l) => l.id === made.body.id);
+  eq('and its first kickoff comes back in milliseconds', read.firstStartAt, kick);
+  // Queued from the kickoff, not from when it was written: a Thursday lock on
+  // a Sunday game must cost nothing until Sunday evening.
+  eq('and it is queued three hours after kickoff',
+    g.raw.prepare('SELECT next_poll_ts n FROM grade_queue WHERE lock_id = ?').get(made.body.id).n,
+    Math.floor(kick / 1000) + 3 * 3600);
+
+  // A lock with no kickoff recorded falls back to when it was placed, which
+  // is what every lock written before this fix has.
+  const bare = await call(g, 'u1', 'POST', '/v1/locks', {
+    code: lg, weekKey: '2026-W45', stakeCents: 1000, payoutCents: 2500,
+    picks: [{ text: 'CeeDee Lamb Over 94.5 Receiving Yards', league: 'nfl', odds: -115 }],
+    placedAt: kick,
+  });
+  eq('a lock with no kickoff still stores none',
+    g.raw.prepare('SELECT first_start_ts f FROM locks WHERE id = ?').get(bare.body.id).f, null);
+}
+
+sec('week 9: the grader asks for the lock\'s own day, not today\'s board');
+{
+  /* THE lock-stays-live bug, on the server side. A scoreboard asked for no
+   * date answers with the CURRENT week, so a lock whose games are behind that
+   * board can never settle: its games are simply not in the reply. Asking
+   * `?dates=YYYYMMDD` still returns a finished day months later. */
+  const fx = (n) => readFileSync(new URL(`../fixtures/${n}`, import.meta.url), 'utf8');
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  // The board the fixture holds, and a lock placed two days before it.
+  const board = JSON.parse(fx('nfl_scoreboard.json'));
+  const starts = board.events.map((e) => Date.parse(e.date)).filter(Number.isFinite);
+  const boardStart = Math.min(...starts);
+  const anchor = boardStart - 2 * 86400000;
+  const wantKey = dateKeyOf(anchor);
+
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    asked.push(u);
+    // The dated request answers with the same real board, standing in for
+    // the lock's own day; the undated one answers with it too. What is being
+    // asserted is WHICH url the grader asks for.
+    const body = u.includes('/football/nfl/scoreboard') ? fx('nfl_scoreboard.json')
+      : u.includes('/football/nfl/summary?event=401873023') ? fx('nfl_final_car_gb.json')
+        : null;
+    if (!body) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => JSON.parse(body) };
+  };
+
+  try {
+    const g = fresh();
+    await signUp(g, 'u1', 'Grant');
+    const lg = (await call(g, 'u1', 'POST', '/v1/leagues', { name: 'G', startBankrollCents: 10000 })).body.league.code;
+    const old = (await call(g, 'u1', 'POST', '/v1/locks', {
+      code: lg, weekKey: '2026-W44', stakeCents: 1000,
+      picks: [{ text: 'Packers ML', league: 'nfl', odds: -165 }],
+      placedAt: anchor, firstStartAt: anchor,
+    })).body.id;
+    g.raw.exec('UPDATE grade_queue SET next_poll_ts = 0');
+
+    const res = await runGrader(g, Math.floor(Date.now() / 1000));
+    ok(`the grader asked for ?dates=${wantKey}`,
+      asked.some((u) => u.includes(`scoreboard?dates=${wantKey}`)), asked.join(' '));
+    eq('and the stale lock settled instead of lingering', res.settled, 1);
+    eq('on its own day\'s result',
+      g.raw.prepare('SELECT settled_state s FROM locks WHERE id = ?').get(old).s, 'won');
+    eq('and it left the queue', g.raw.prepare('SELECT COUNT(*) c FROM grade_queue').get().c, 0);
+
+    // A lock whose games ARE on the current board costs no extra request.
+    const g2 = fresh();
+    await signUp(g2, 'u2', 'Ash');
+    const lg2 = (await call(g2, 'u2', 'POST', '/v1/leagues', { name: 'A', startBankrollCents: 10000 })).body.league.code;
+    await call(g2, 'u2', 'POST', '/v1/locks', {
+      code: lg2, weekKey: '2026-W45', stakeCents: 1000,
+      picks: [{ text: 'Packers ML', league: 'nfl', odds: -165 }],
+      placedAt: boardStart, firstStartAt: boardStart,
+    });
+    g2.raw.exec('UPDATE grade_queue SET next_poll_ts = 0');
+    asked.length = 0;
+    await runGrader(g2, Math.floor(Date.now() / 1000));
+    eq('a current lock needs no dated request', asked.filter((u) => u.includes('dates=')).length, 0);
   } finally {
     globalThis.fetch = realFetch;
   }

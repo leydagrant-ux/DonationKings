@@ -40,26 +40,37 @@ const FOOTBALL_STAT_PHRASES = [
 
   [/\b(pass(ing)?\s*\+\s*rush(ing)?\s*yards?|pass\s*&\s*rush\s*yards?)\b/, 'passRushYards'],
   [/\b(rush(ing)?\s*\+\s*rec(eiving)?\s*yards?|rush\s*&\s*rec\s*yards?|scrimmage\s*yards?)\b/, 'scrimmageYards'],
+
+  // "Longest ..." comes before the plain stat it is built on. "Longest
+  // Reception" read as `receptions` graded CeeDee Lamb's 48-yard long as his
+  // 10 catches and settled an over that won as a loss. Ordering is the only
+  // thing that keeps these apart, so these two stay above receptions and
+  // rushing.
+  [/\blong(est)?\s*rec(eption)?s?\b/, 'longRec'],
+  [/\blong(est)?\s*receiving\b/, 'longRec'],
+  [/\blong(est)?\s*rush(ing)?\b/, 'longRush'],
+
   [/\bpass(ing)?\s*(yards?|yds?)\b/, 'passYards'],
   [/\bpass(ing)?\s*(touchdowns?|tds?)\b/, 'passTd'],
   [/\bpass(ing)?\s*(completions?|comp)\b/, 'completions'],
   [/\bpass(ing)?\s*attempts?\b/, 'passAttempts'],
-  // The bare forms, which is how a daily-fantasy app labels them. These sit
-  // after the "passing ..." versions so the longer wording still wins.
-  [/\b(completions?|comp)\b/, 'completions'],
-  [/\battempts?\b/, 'passAttempts'],
   [/\b(interceptions?\s*thrown|int(erception)?s?\s*thrown)\b/, 'interceptionsThrown'],
   [/\brush(ing)?\s*(yards?|yds?)\b/, 'rushYards'],
   [/\brush(ing)?\s*(touchdowns?|tds?)\b/, 'rushTd'],
-  [/\brush(ing)?\s*attempts?\b/, 'rushAttempts'],
+  [/\b(rush(ing)?\s*(attempts?|att)|carries|carr?y)\b/, 'rushAttempts'],
   [/\brec(eiving)?\s*(yards?|yds?)\b/, 'recYards'],
   [/\brec(eiving)?\s*(touchdowns?|tds?)\b/, 'recTd'],
-  [/\b(receptions?|catches)\b/, 'receptions'],
+  [/\b(receptions?|catches|rec)\b/, 'receptions'],
   [/\btargets?\b/, 'targets'],
-  [/\blongest\s*rec(eption)?\b/, 'longRec'],
-  [/\blongest\s*rush\b/, 'longRush'],
-  [/\bfield\s*goals?\s*made\b/, 'fgMade'],
-  [/\bkicking\s*points?\b/, 'kickingPoints'],
+  // The bare forms, which is how a daily-fantasy app labels them. These sit
+  // after every "passing ..." AND "rushing ..." version so the longer wording
+  // still wins. A bare `attempts` placed above `rushing attempts` read every
+  // rushing-attempts prop as passing attempts, which a running back has none
+  // of, so an over that won was settled at zero.
+  [/\b(completions?|comp)\b/, 'completions'],
+  [/\battempts?\b/, 'passAttempts'],
+  [/\b(field\s*goals?(\s*made)?|fgs?\s*made|fgm)\b/, 'fgMade'],
+  [/\b(kicking\s*points?|kicker\s*points?)\b/, 'kickingPoints'],
   [/\b(tackles?\s*\+\s*assists?|combined\s*tackles?|total\s*tackles?|tackles?)\b/, 'tackles'],
   [/\bsacks?\b/, 'sacks'],
   // Bare "touchdown" wording is the anytime market, which is why it is last:
@@ -82,9 +93,10 @@ const BASKETBALL_STAT_PHRASES = [
   [/\b(points?|pts?)\b/, 'points'],
   [/\b(rebounds?|reb)\b/, 'rebounds'],
   [/\b(assists?|ast)\b/, 'assists'],
-  [/\bsteals?\b/, 'steals'],
-  [/\bblocks?\b/, 'blocks'],
-  [/\bturnovers?\b/, 'turnovers'],
+  [/\b(steals?|stl)\b/, 'steals'],
+  [/\b(blocks?|blk)\b/, 'blocks'],
+  // `tov`, never a bare `to`: "to score" and "to win" are ordinary wording.
+  [/\b(turnovers?|tov)\b/, 'turnovers'],
   [/\b(minutes?|min)\b/, 'minutes'],
 ];
 
@@ -232,6 +244,30 @@ export function parseLegText(raw, sport = 'football') {
         confidence: C.EXACT,
       };
     }
+    // Wording left over after the number that is not a stat we know means
+    // this is a market this file does not understand, NOT a team total.
+    //
+    // A team total is written with nothing after the line ("Packers Over
+    // 30.5"); a player prop always names its stat ("Trey Smack Over 2.5 FG
+    // Made"). Treating the second as the first is how an unrecognized stat
+    // wording turned into a confident team-total settlement off the score of
+    // whichever team the player's name happened to look like. So a leftover
+    // phrase sends the leg to a person, naming the words it could not read.
+    // "Chiefs Over 24.5 Team Total" says total twice rather than naming a
+    // stat, so that wording is not leftover at all.
+    const totalWording = /^(team\s*)?totals?(\s*(points?|runs?|goals?))?$/i.test(after)
+      || /^points?$/i.test(after);
+    if (after && !totalWording && !matchStat(after, sport)) {
+      return {
+        market: null,
+        subjectRaw: before || null,
+        side,
+        line,
+        stat: null,
+        confidence: C.NONE,
+        reason: `could not tell what stat "${after}" is`,
+      };
+    }
     // An over/under with no recognizable stat and a team in front is a team
     // total, unless the text names BOTH sides of a matchup, which is how a
     // book words a GAME total: "Knicks vs Bulls Over 233.5".
@@ -334,14 +370,34 @@ export function resolveTeam(nameRaw, events) {
 
   // Nothing exact. Try a containment pass, which catches a slip that writes
   // "Green Bay Packers " with trailing junk or drops the city.
+  //
+  // Whole words only, and never an abbreviation. A raw substring test against
+  // every naming field let a three-letter abbreviation match anywhere inside
+  // a person's name: "Barrett Carter" resolved to CAR, "LaCale London" to
+  // LAC, "Charles Snowden" to DEN. On the real week 9 slate 306 player props
+  // whose stat wording this file did not recognize fell through to the team
+  // total market and were then settled, confidently, off that team's score.
+  // A name is only a team here if it lines up on word boundaries, so
+  // "Green Bay Packers" still matches "Packers" and "Carter" matches nothing.
+  const words = (s) => normName(s).split(' ').filter(Boolean);
+  const wantWords = words(nameRaw);
+  const runIn = (hay, needle) => {
+    if (!needle.length || needle.length > hay.length) return false;
+    for (let i = 0; i + needle.length <= hay.length; i++) {
+      let all = true;
+      for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) { all = false; break; }
+      if (all) return true;
+    }
+    return false;
+  };
   const loose = [];
   for (const ev of events || []) {
     for (const side of ['home', 'away']) {
       const t = ev[side];
       if (!t) continue;
       if (t.names.some((n) => {
-        const nn = normName(n);
-        return nn.length >= 3 && (want.includes(nn) || nn.includes(want));
+        const nw = words(n);
+        return runIn(wantWords, nw) || runIn(nw, wantWords);
       })) loose.push({ ev, side, t });
     }
   }
@@ -483,7 +539,13 @@ export function resolveLeg(leg, ctx) {
   }
 
   if (TEAM_MARKETS.has(parsed.market)) {
-    const t = resolveTeam(parsed.subjectRaw, ctx.events);
+    // A leg that already knows its game is resolved inside that game only.
+    // Two fixtures between the same two teams a week apart are otherwise
+    // indistinguishable by wording alone.
+    const scoped = leg.eventId
+      ? (ctx.events || []).filter((e) => e.eventId === leg.eventId)
+      : ctx.events;
+    const t = resolveTeam(parsed.subjectRaw, scoped);
     if (!t.eventId) return { ...parsed, confidence: C.NONE, reason: t.reason };
     // The game is known but the side is not, because the text named both
     // teams. A moneyline or spread has to be graded for one of them, so this
@@ -496,7 +558,16 @@ export function resolveLeg(leg, ctx) {
         reason: `"${parsed.subjectRaw}" names both teams, so there is no side to grade`,
       };
     }
-    return { ...parsed, eventId: t.eventId, teamAbbr: t.teamAbbr, side_: t.side, confidence: t.confidence };
+    // The minimum across the steps, as the docstring says: a leg is only as
+    // trustworthy as its weakest resolution. Returning the team's confidence
+    // alone promoted a guessed team total to an exact one.
+    return {
+      ...parsed,
+      eventId: t.eventId,
+      teamAbbr: t.teamAbbr,
+      side_: t.side,
+      confidence: Math.min(t.confidence, parsed.confidence === undefined ? C.EXACT : parsed.confidence),
+    };
   }
 
   if (PLAYER_MARKETS.has(parsed.market)) {
@@ -519,4 +590,57 @@ export function resolveLeg(leg, ctx) {
   }
 
   return { ...parsed, confidence: C.NONE, reason: `market "${parsed.market}" is not supported yet` };
+}
+
+// ---------------------------------------------------------------------------
+// Attaching a lock's legs to their games, at the moment it is placed
+// ---------------------------------------------------------------------------
+
+/**
+ * Work out which game each leg belongs to, and the earliest kickoff among
+ * them.
+ *
+ * This runs once, when a lock is saved. The kickoff is what tells the server
+ * whether the lock got in before the games started, and it is also the anchor
+ * the feed later uses to fetch the right day's slate rather than today's.
+ *
+ * It lives here rather than in `app.js` because it is a pure function of the
+ * legs and the slate, and because the old version in `app.js` got two things
+ * wrong, both of which made a bet placed WHILE a game was running arrive with
+ * no game attached at all:
+ *
+ *   * It read the grading slate, which the app empties on purpose whenever
+ *     you hold no open locks. So the first lock of a session had nothing to
+ *     match against and went up with no kickoff, which the server reads as
+ *     "no game had started" and marks eligible. It also left `first_start_ts`
+ *     null, and with that the server's own "a lock cannot be deleted after
+ *     kickoff" guard never fires either, so a mid-game loser could be taken
+ *     back off the standings.
+ *
+ *   * It scanned for team wording only, so a player prop never found a
+ *     kickoff even when the slate WAS loaded. Mid-game that question is
+ *     answerable: the game is running, so its box score exists and the player
+ *     is in it. Resolving the leg properly finds the game a text scan cannot.
+ *
+ * Returns { picks, firstStartAt }: the same picks, each carrying `eventId`
+ * where one was found, and the earliest `startAt` across them, or null. Using
+ * the resolver means this agrees with how the leg will actually be graded
+ * instead of being a second, looser guess at the same question.
+ */
+export function attachEvents(picks, { events = [], snapshots = [] } = {}) {
+  let best = null;
+  const out = (picks || []).map((pick) => {
+    const sport = (LEAGUES[pick.league] || {}).sport || 'football';
+    const parsed = parseLegText(pick.text, sport);
+    const r = resolveLeg({ ...parsed, rawText: pick.text }, {
+      league: pick.league,
+      events: events.filter((e) => e.league === pick.league),
+      snapshots: snapshots.filter((s) => s.league === pick.league),
+    });
+    if (!r.eventId) return pick;
+    const ev = events.find((e) => e.eventId === r.eventId);
+    if (ev && Number.isFinite(ev.startAt) && (best === null || ev.startAt < best)) best = ev.startAt;
+    return { ...pick, eventId: r.eventId };
+  });
+  return { picks: out, firstStartAt: best };
 }

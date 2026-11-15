@@ -336,7 +336,17 @@ function gradeFirstTd(leg, snapshot, out, final) {
   }
 
   const want = normName(scorer);
-  const hit = !!player && (player.fullNorm === want || player.lastNorm === normName(scorer).split(' ').pop());
+  // Full name, or a surname that belongs to nobody else in this game.
+  //
+  // A bare surname test credited the wrong man: Tampa Bay at Chicago in week
+  // 9 fielded David Walker and Jahdae Walker, and GB at NE four players
+  // named Williams, so "lastNorm === the scorer's surname" cashed a first-TD
+  // leg on whichever Walker you did not back. The surname only settles it
+  // when the box score holds exactly one of them.
+  const surname = want.split(' ').pop();
+  const sharing = (snapshot.byLast.get(surname) || []).length;
+  const hit = !!player && (player.fullNorm === want
+    || (player.lastNorm === surname && sharing === 1));
   out.current = hit ? 1 : 0;
   out.label = `first TD: ${scorer}`;
   if (hit) out.clinched = true;

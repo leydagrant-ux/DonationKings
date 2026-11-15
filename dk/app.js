@@ -30,7 +30,7 @@ import { isConfigured } from './config.js';
 import { STATE } from './grade.js';
 import { parseAmerican } from './odds.js';
 import { LEAGUES } from './espn.js';
-import { parseLegText } from './resolve.js';
+import { parseLegText, attachEvents } from './resolve.js';
 import { autoprice, repayout, flipSide } from './slip.js';
 import * as ST from './stats.js';
 import * as SV from './ui-stats.js';
@@ -715,19 +715,25 @@ root.addEventListener('click', async (e) => {
   if (action === 'save-lock') {
     readDraftInputs();
     const lg = league();
+    // Each leg's game, and the earliest kickoff across them, so the server
+    // can judge whether this got in before the games started. It decides,
+    // not us; this only has to hand it the facts.
+    const attached = attachEvents(
+      draft.picks.map((p) => ({ text: p.text.trim(), league: p.league, odds: parseAmerican(p.odds) })),
+      { events: pricingEvents(), snapshots: ctx.snapshots },
+    );
     const lock = {
       ...S.newLock({
         code: draft.code || lg.code,
         uid: state.me.uid,
         stakeCents: draft.stakeCents,
         payoutCents: draft.payoutCents,
-        picks: draft.picks.map((p) => ({ text: p.text.trim(), league: p.league, odds: parseAmerican(p.odds) })),
+        picks: attached.picks,
       }),
       weekKey: weekKey(),
+      firstStartAt: attached.firstStartAt,
     };
-    // The earliest kickoff across the legs, so the server can judge whether
-    // this got in before the games started. It decides, not us.
-    const firstStart = earliestStart(lock);
+    const firstStart = attached.firstStartAt;
     btn.disabled = true;
     const r = await be.addLock(lock, firstStart);
     btn.disabled = false;
@@ -757,23 +763,6 @@ root.addEventListener('click', async (e) => {
   if (action === 'refresh') return refresh();
   return undefined;
 });
-
-/** The earliest resolved kickoff among a lock's legs, in ms, or null. */
-function earliestStart(lock) {
-  let best = null;
-  for (const pick of lock.picks) {
-    for (const e of ctx.events) {
-      if (e.league !== pick.league || !e.startAt) continue;
-      const text = String(pick.text || '').toLowerCase();
-      const named = [e.home, e.away].some((t) => t && t.names.some((n) => {
-        const nn = String(n).toLowerCase();
-        return nn.length >= 3 && text.includes(nn);
-      }));
-      if (named && (best === null || e.startAt < best)) best = e.startAt;
-    }
-  }
-  return best;
-}
 
 /** Draft fields are read back out of the DOM on demand, not on every keypress. */
 function readDraftInputs() {
