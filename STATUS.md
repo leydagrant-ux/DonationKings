@@ -11,9 +11,10 @@ bankroll for the week.
 ## Where it stands
 
 **SHIPPED, and it reads screenshots.** Live at <https://leydagrant-ux.github.io/DonationKings/>, backed
-by a deployed Worker and D1. 970 checks pass across three suites.
+by a deployed Worker and D1. 979 checks pass across three suites.
 
-Three bugs hit during NFL week 9 are fixed; see [The week 9 bugs](#the-week-9-bugs)
+Four bugs hit live during NFL weeks 9 and 10 are fixed; see
+[The week 9 and 10 bugs](#the-week-9-and-10-bugs)
 below for what was wrong and what is still open.
 
 There is now a read-only route for the TV overlay, `GET /overlay/parlays`. It
@@ -226,7 +227,8 @@ block non-browser user agents, and updates player stats mid-game.
 
 **Four traps, each of which silently grades bets wrong.** Every one has a
 regression test; do not "simplify" them away. Three more turned up during
-week 9 and are written up under [The week 9 bugs](#the-week-9-bugs): the stat
+week 9 and are written up under
+[The week 9 and 10 bugs](#the-week-9-and-10-bugs): the stat
 table's ORDER is load-bearing, a team abbreviation must never match inside a
 player's name, and a lock must be graded against its own day's slate.
 
@@ -555,7 +557,7 @@ gets there first writes the record, and the other is a harmless no-op. The
 ledger's `UNIQUE` idempotency key is what makes that structural rather than a
 convention.
 
-## The week 9 bugs
+## The week 9 and 10 bugs
 
 Three things went wrong using it live on NFL week 9 (games 8 and 9 November
 2026), reported on the 14th. All three were reproduced against the real week 8
@@ -685,6 +687,46 @@ correctly, verified across every suffixed player on the week 9 slate; and this
 app reads names from `scoringPlays` (full names) rather than from play-by-play,
 so the `S.Perine` abbreviation never reaches it. The initial-with-no-space form
 ("J.Love") does fail to resolve, all 281 of them, so do not feed it one.
+
+### The week 10 one, found the same way
+
+**A shared first initial is not a match.** A prop on Javonte Williams of
+Dallas resolved to Jameson Williams of Detroit. After an exact first name
+failed, the fallback tested the first LETTER, and that returns `C.INITIAL`,
+0.9, which is above the auto-grade bar, so it was taken silently.
+
+It bit on a Sunday morning because of what the slate looks like then. The
+9:30 game was the only one with a box score and Dallas had not kicked off, so
+the only Williams the app could see was the wrong one.
+
+The second symptom was the expensive one and came free with the first:
+`attachEvents` pins a leg to its game, so the lock was pinned to DETROIT'S
+fixture, which had kicked off hours earlier, and the server read that kickoff
+as proof the bet was placed mid-game and took it out of the week's standings.
+That consequence is new, because before `attachEvents` a player prop never
+found a kickoff at all. It is worth keeping in mind for any future change
+here: **anything that makes leg resolution more willing to guess now also
+decides whether a lock counts.**
+
+A first name has to FIT now: equal, or one a prefix of the other. That still
+accepts the two things a slip really does, printing an initial ("J. Williams")
+and shortening a name ("Josh" where the roster says Joshua, "Cam" for
+Cameron), and refuses two different names that merely start alike. "javonte"
+and "jameson" share a letter and nothing else; a prefix test says so and a
+first-letter test cannot.
+
+One repair this needed in the live database, because the damage was already
+written: a lock created while this was broken carries `eligible = 0` and a
+`first_start_ts` belonging to the wrong game, and neither is recomputed. The
+leg text is fine and re-resolves correctly on its own, since the event id is
+not stored server-side. Only the two columns need it:
+
+```sql
+UPDATE locks SET eligible = 1, first_start_ts = NULL WHERE id = '<lock id>';
+```
+
+`locks_core_immutable` covers the stake, week, owner and timestamps but not
+those two, so the update is allowed. Verified against the real DDL.
 
 ### What is still honestly unresolved
 
