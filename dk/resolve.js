@@ -426,11 +426,36 @@ function nameParts(nameRaw) {
 }
 
 /**
+ * Does a written first name fit the one in the box score?
+ *
+ * Exact, or one is a PREFIX of the other. That covers the two things a slip
+ * legitimately does: print an initial ("J. Williams") and shorten a name
+ * ("Josh Jacobs" where the roster says Joshua, "Cam" for Cameron).
+ *
+ * What it deliberately does not cover is two different names that happen to
+ * start with the same letter. Testing the first letter alone matched
+ * "Javonte" to "Jameson": on the week 10 Sunday slate, with only the early
+ * game's box score loaded, a prop on Javonte Williams of Dallas resolved to
+ * Jameson Williams of Detroit at 0.9 confidence, which is above the bar, so
+ * it was taken silently. The leg was then attached to Detroit's game, and
+ * because that one had kicked off, the whole lock was marked as placed
+ * mid-game and lost its place in the week.
+ *
+ * "javonte" and "jameson" share a letter and nothing else. A prefix test says
+ * so; a first-letter test cannot.
+ */
+function firstNameFits(given, actual) {
+  if (!given || !actual) return false;
+  const [short, long] = given.length <= actual.length ? [given, actual] : [actual, given];
+  return long.startsWith(short);
+}
+
+/**
  * Match a player name inside one game's box score.
  *
  * Deliberately not a string-similarity function. ESPN gives firstName and
  * lastName as separate fields, so "T. McMillan" is an exact last-name match
- * plus a first-initial check, which is both cheaper and far less likely to
+ * plus a first-name check, which is both cheaper and far less likely to
  * confidently pick the wrong person than a fuzzy score would be.
  */
 export function resolvePlayerInSnapshot(nameRaw, snapshot) {
@@ -450,19 +475,23 @@ export function resolvePlayerInSnapshot(nameRaw, snapshot) {
     // require it to agree, otherwise we would happily accept the wrong Smith.
     const only = byLast[0];
     if (p.parts.length === 1) return { athleteId: only.id, player: only, confidence: C.LAST_ONLY };
-    const initialOk = only.firstNorm && only.firstNorm[0] === p.first[0];
-    const firstOk = only.firstNorm === p.first;
-    if (firstOk) return { athleteId: only.id, player: only, confidence: C.EXACT };
-    if (initialOk) return { athleteId: only.id, player: only, confidence: C.INITIAL };
-    return { confidence: C.AMBIGUOUS, reason: `surname matched ${only.display} but the first name does not` };
+    if (only.firstNorm === p.first) return { athleteId: only.id, player: only, confidence: C.EXACT };
+    if (firstNameFits(p.first, only.firstNorm)) {
+      return { athleteId: only.id, player: only, confidence: C.INITIAL };
+    }
+    return {
+      confidence: C.AMBIGUOUS,
+      reason: `the only ${p.last} in this game is ${only.display}, which is not who you named`,
+    };
   }
   if (byLast.length > 1) {
-    // Several share the surname. A full first name, then an initial, then
-    // the jersey number are the tie-breakers; if none settles it, ask.
+    // Several share the surname. A full first name, then a first name the
+    // written one fits, then the jersey number are the tie-breakers; if none
+    // settles it, ask.
     const exactFirst = byLast.filter((x) => x.firstNorm === p.first);
     if (exactFirst.length === 1) return { athleteId: exactFirst[0].id, player: exactFirst[0], confidence: C.EXACT };
-    const byInitial = byLast.filter((x) => x.firstNorm && x.firstNorm[0] === p.first[0]);
-    if (byInitial.length === 1) return { athleteId: byInitial[0].id, player: byInitial[0], confidence: C.INITIAL };
+    const fits = byLast.filter((x) => firstNameFits(p.first, x.firstNorm));
+    if (fits.length === 1) return { athleteId: fits[0].id, player: fits[0], confidence: C.INITIAL };
     return {
       confidence: C.AMBIGUOUS,
       reason: `${byLast.length} players named ${p.last} in this game`,

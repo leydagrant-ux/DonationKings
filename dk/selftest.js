@@ -2525,6 +2525,92 @@ function testWeekNine(t, snaps, fixtures) {
 }
 
 // ---------------------------------------------------------------------------
+// The week 10 name bug
+// ---------------------------------------------------------------------------
+//
+// Matching on the first LETTER of a first name put a Dallas running back's
+// prop on a Detroit receiver: "Javonte" and "Jameson" share a J and nothing
+// else, and C.INITIAL is 0.9, comfortably above the auto-grade bar. It was
+// taken silently.
+//
+// The second symptom came free with the first. The entry form attaches a leg
+// to its game, so the lock was attached to DETROIT'S game, which had kicked
+// off hours earlier, and the server marked the whole thing as placed
+// mid-game and took it out of the week's standings.
+//
+// A first name now has to FIT: exact, or one a prefix of the other. That
+// still accepts the two things a slip really does, printing an initial and
+// shortening a name, and refuses two different names that merely start alike.
+
+function testWeekTenNames(t, snaps) {
+  const nfl = snaps.nfl;
+  t.section('week 10: a first name has to fit, not just start the same way');
+
+  let exacts = 0;
+  let impostors = 0;
+  let initials = 0;
+  const caught = [];
+  for (const pl of nfl.players.values()) {
+    if (!pl.firstNorm || !pl.lastNorm || !pl.display) continue;
+
+    // The full name is always the man himself.
+    if (R.resolvePlayerInSnapshot(pl.display, nfl).athleteId === pl.id) exacts += 1;
+
+    // A DIFFERENT first name that merely begins with the same letter, which
+    // is exactly the shape of Javonte against Jameson. It must match nobody.
+    const impostor = `${pl.firstNorm[0]}zzqx ${pl.lastNorm}`;
+    const r = R.resolvePlayerInSnapshot(impostor, nfl);
+    if (r.athleteId) {
+      impostors += 1;
+      if (caught.length < 5) caught.push(`"${impostor}" -> ${r.player && r.player.display} at ${r.confidence}`);
+    }
+
+    // And an initial still resolves, when only one man in the game fits it.
+    const sameLast = nfl.byLast.get(pl.lastNorm) || [];
+    const fitting = sameLast.filter((x) => x.firstNorm && x.firstNorm[0] === pl.firstNorm[0]);
+    if (fitting.length === 1) {
+      if (R.resolvePlayerInSnapshot(`${pl.firstNorm[0]}. ${pl.lastNorm}`, nfl).athleteId === pl.id) initials += 1;
+    }
+  }
+  t.ok(`every player resolves by his full name (${exacts})`, exacts > 0);
+  t.eq('a first name sharing only its initial matches nobody', caught, []);
+  t.eq('and none slipped through at all', impostors, 0);
+  t.ok(`an initial still resolves when it is unambiguous (${initials})`, initials > 0);
+
+  // A shortened first name is still the same man: "Josh" for Joshua, "Cam"
+  // for Cameron. Picked from a player whose surname nobody in the game
+  // shares, so the only thing under test is the first name.
+  const solo = [...nfl.players.values()].find((p) => p.firstNorm && p.firstNorm.length >= 5
+    && (nfl.byLast.get(p.lastNorm) || []).length === 1);
+  if (solo) {
+    t.eq(`a shortened first name still matches ("${solo.firstNorm.slice(0, 3)}" for ${solo.display})`,
+      R.resolvePlayerInSnapshot(`${solo.firstNorm.slice(0, 3)} ${solo.lastNorm}`, nfl).athleteId, solo.id);
+  }
+
+  // The consequence that cost the lock its place in the week: a name the
+  // slate cannot place must attach NO game, so the server is not handed some
+  // other fixture's kickoff and told the bet was late.
+  t.section('week 10: a player the slate cannot place attaches no game');
+  // The event id is the snapshot's own, because that is what the resolver
+  // reports back for a player it found in that box score.
+  const slate = [{
+    eventId: nfl.eventId, league: 'nfl', startAt: 1, state: 'in', home: nfl.home, away: nfl.away,
+  }];
+  const someone = [...nfl.players.values()].find((p) => p.firstNorm && p.lastNorm);
+  const stranger = `${someone.firstNorm[0]}zzqx ${someone.lastNorm}`;
+  const a = R.attachEvents([{ text: `${stranger} Over 49.5 Rushing Yards`, league: 'nfl' }],
+    { events: slate, snapshots: [nfl] });
+  t.eq('no game is attached', a.picks[0].eventId, undefined);
+  t.eq('and no kickoff is reported', a.firstStartAt, null);
+  // Which is what keeps the lock in the week: the server reads a missing
+  // kickoff as "no game of this lock had started".
+  const real = R.attachEvents([{ text: `${someone.display} Over 49.5 Rushing Yards`, league: 'nfl' }],
+    { events: slate, snapshots: [nfl] });
+  t.eq('while a name it CAN place still attaches its game', real.picks[0].eventId, nfl.eventId);
+  t.eq('and reports that kickoff', real.firstStartAt, 1);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -2555,6 +2641,7 @@ export function runAll(fixtures) {
   testStats(t);
   testPricing(t, fixtures);
   testWeekNine(t, snaps, fixtures);
+  testWeekTenNames(t, snaps);
   const ms = Date.now() - t0;
   const passed = t.results.filter((r) => r.pass).length;
   return { results: t.results, passed, failed: t.results.length - passed, ms };
